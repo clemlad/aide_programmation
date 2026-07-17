@@ -1,0 +1,117 @@
+// Schéma Prisma — programmation cinéma (v3)
+//
+// Principe : les horaires (blocs, heures par salle, exceptions jour/saison) sont
+// des RÉGLAGES PERSISTANTS configurés une fois et modifiés ponctuellement.
+// Seuls films + quotas + semaines sont saisis à chaque génération.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Film {
+  id           String   @id @default(cuid())
+  titre        String
+  dureeMinutes Int
+  publicCible  String?  // ex: "ENFANT" — null = tout public, utilisé pour filtrer certains blocs
+  createdAt    DateTime @default(now())
+
+  seances      Seance[]
+}
+
+model Salle {
+  id        String   @id @default(cuid())
+  nom       String
+  createdAt DateTime @default(now())
+
+  horaires  BlocHoraireDefaut[]
+  seances   Seance[]
+}
+
+// Un bloc = un segment de la journée (matin, aprem, soir1, soir2...), sans horaire propre :
+// l'horaire dépend de la salle (voir BlocHoraireDefaut).
+model Bloc {
+  id    String @id @default(cuid())
+  nom   String // "matin", "aprem", "soir1", "soir2"
+  ordre Int    // tri chronologique
+
+  horaires   BlocHoraireDefaut[]
+  exceptions ExceptionHoraire[]
+  seances    Seance[]
+
+  @@unique([ordre])
+}
+
+// Horaire de départ par défaut d'un bloc, PROPRE À CHAQUE SALLE.
+// Ex: bloc "aprem" -> Salle 1 = 15:30, Salle 2 = 15:45
+model BlocHoraireDefaut {
+  id         String @id @default(cuid())
+  bloc       Bloc   @relation(fields: [blocId], references: [id])
+  blocId     String
+  salle      Salle  @relation(fields: [salleId], references: [id])
+  salleId    String
+  heureDebut String // "HH:mm"
+
+  @@unique([blocId, salleId])
+}
+
+enum Jour {
+  LUNDI
+  MARDI
+  MERCREDI
+  JEUDI
+  VENDREDI
+  SAMEDI
+  DIMANCHE
+}
+
+// Exception à l'horaire par défaut, pour un jour donné (et optionnellement une salle
+// et une période de l'année). Couvre le cas "jeudi en été, bloc matin à 10h30,
+// réservé aux films enfants" — mais reste générique pour tout autre cas futur.
+model ExceptionHoraire {
+  id             String   @id @default(cuid())
+  jour           Jour
+  bloc           Bloc     @relation(fields: [blocId], references: [id])
+  blocId         String
+  salleId        String?  // null = s'applique à toutes les salles
+  heureDebut     String?  // null = pas de changement d'horaire, juste une contrainte de contenu
+  publicRequis   String?  // ex: "ENFANT" — restreint les films éligibles sur ce bloc/jour
+  periodeDebut   String?  // "MM-DD", ex "06-01" pour "période estivale" — null = toute l'année
+  periodeFin     String?  // "MM-DD", ex "08-31"
+}
+
+model Semaine {
+  id        String   @id @default(cuid())
+  anneeIso  Int
+  numeroIso Int
+  createdAt DateTime @default(now())
+
+  seances   Seance[]
+
+  @@unique([anneeIso, numeroIso])
+}
+
+model Seance {
+  id          String   @id @default(cuid())
+  jour        Jour
+  heureDebut  String   // horaire réel calculé
+  genereAuto  Boolean  @default(true) // false si modifié manuellement après génération
+
+  film        Film     @relation(fields: [filmId], references: [id])
+  filmId      String
+
+  salle       Salle    @relation(fields: [salleId], references: [id])
+  salleId     String
+
+  bloc        Bloc     @relation(fields: [blocId], references: [id])
+  blocId      String
+
+  semaine     Semaine  @relation(fields: [semaineId], references: [id])
+  semaineId   String
+
+  @@unique([salleId, jour, semaineId, heureDebut])
+}
