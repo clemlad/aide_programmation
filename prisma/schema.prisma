@@ -1,12 +1,15 @@
-// Schéma Prisma — programmation cinéma (v7)
+// Schéma Prisma — programmation cinéma (v8)
 //
-// v6 : génération automatique par quotas (Film, Semaine, Seance — 4 blocs fixes).
-// v7 : ajout de Placement, pour le mode manuel "Programmation" (glisser-déposer,
-// horaire libre à la minute, indépendant des blocs et des semaines ISO — un
-// Placement est rattaché à un jour de la semaine (récurrent), pas à une date précise).
-//
-// Les deux modes coexistent et ne se marchent pas dessus : Seance appartient au
-// générateur automatique, Placement au mode manuel.
+// v7 : ajout de Placement (mode manuel, glisser-déposer).
+// v8 :
+//  - Film.seancesParSemaine : quota hebdomadaire souhaité par film (même valeur
+//    chaque semaine — voir lib/scheduler.ts pour la logique de remise à zéro).
+//  - Suppression du modèle Semaine (semaines calendaires ISO) : il n'y a plus que
+//    deux semaines indépendantes et fixes, identifiées par un entier 1 ou 2, sur
+//    Seance (génération auto) ET sur Placement (mode manuel).
+//  - Les événements spéciaux (Ciné P'tit Déj, etc.) ne sont PAS modélisés en base :
+//    ils vivent en code dans lib/scheduler.ts (EVENEMENTS_SPECIAUX), pour rester
+//    cohérent avec le choix déjà fait de sortir salles/blocs/horaires de la DB.
 
 generator client {
   provider = "prisma-client-js"
@@ -18,25 +21,15 @@ datasource db {
 }
 
 model Film {
-  id             String   @id @default(cuid())
-  titre          String
-  dureeMinutes   Int
-  classification String?  // null = tous publics ; sinon "12", "16", "18" (âge minimum)
-  createdAt      DateTime @default(now())
+  id                String   @id @default(cuid())
+  titre             String
+  dureeMinutes      Int
+  classification    String?  // null = tous publics ; sinon "12", "16", "18" (âge minimum)
+  seancesParSemaine Int // quota hebdomadaire OBLIGATOIRE, identique semaine 1 et semaine 2 (validé dans app/api/films/route.ts)
+  createdAt         DateTime @default(now())
 
-  seances        Seance[]
-  placements     Placement[]
-}
-
-model Semaine {
-  id        String   @id @default(cuid())
-  anneeIso  Int
-  numeroIso Int
-  createdAt DateTime @default(now())
-
-  seances   Seance[]
-
-  @@unique([anneeIso, numeroIso])
+  seances    Seance[]
+  placements Placement[]
 }
 
 enum Jour {
@@ -49,36 +42,38 @@ enum Jour {
   MARDI
 }
 
+// Séance générée automatiquement (onglet Générer).
 model Seance {
-  id          String   @id @default(cuid())
-  jour        Jour
-  salleIndex  Int      // 0 = Salle 1, 1 = Salle 2 (fixe, plus de table Salle)
-  blocNom     String   // "matin" | "aprem" | "soir1" | "soir2" (fixe, plus de table Bloc)
-  heureDebut  String   // horaire réel calculé, avec décalage éventuel (+15/+30 min)
-  genereAuto  Boolean  @default(true)
+  id         String  @id @default(cuid())
+  semaine    Int // 1 ou 2 — les deux semaines sont totalement indépendantes
+  jour       Jour
+  salleIndex Int // 0 = Salle 1, 1 = Salle 2
+  blocNom    String // "matin" | "aprem" | "soir1" | "soir2"
+  heureDebut String // horaire réel calculé, après ajustement éventuel (±15/±30 min)
+  genereAuto Boolean @default(true)
 
-  film        Film     @relation(fields: [filmId], references: [id], onDelete: Cascade)
-  filmId      String
+  film   Film   @relation(fields: [filmId], references: [id], onDelete: Cascade)
+  filmId String
 
-  semaine     Semaine  @relation(fields: [semaineId], references: [id], onDelete: Cascade)
-  semaineId   String
-
-  @@unique([salleIndex, blocNom, jour, semaineId])
+  @@unique([semaine, salleIndex, blocNom, jour])
 }
 
 // Séance placée à la main dans l'onglet "Programmation" (glisser-déposer).
-// Récurrente par jour de la semaine — pas de notion de semaine ISO ni de bloc :
-// l'heure de début est libre, à la minute près, sur 00:00-23:59.
+// Récurrente par jour de la semaine, rattachée à l'une des deux semaines
+// indépendantes (1 ou 2) : les quotas de chaque semaine sont donc distincts,
+// et un compteur de séances restantes se calcule en comptant les Placement
+// d'un film pour une semaine donnée, tous jours confondus.
 model Placement {
   id         String   @id @default(cuid())
+  semaine    Int      @default(1) // 1 ou 2
   jour       Jour
-  salleIndex Int      // 0 = Salle 1, 1 = Salle 2
-  heureDebut Int      // minutes depuis minuit (0-1439)
+  salleIndex Int // 0 = Salle 1, 1 = Salle 2
+  heureDebut Int // minutes depuis minuit (0-1439)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  film       Film     @relation(fields: [filmId], references: [id], onDelete: Cascade)
-  filmId     String
+  film   Film   @relation(fields: [filmId], references: [id], onDelete: Cascade)
+  filmId String
 
-  @@index([jour, salleIndex])
+  @@index([semaine, jour, salleIndex])
 }

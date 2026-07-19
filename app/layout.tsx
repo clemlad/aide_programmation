@@ -10,7 +10,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="fr">
       <body>
         <nav className="principale">
-          <a href="/">Accueil</a>
           <a href="/films">Films</a>
           <a href="/programmation">Programmation</a>
           <a href="/generer">Générer</a>

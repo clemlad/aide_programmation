@@ -3,7 +3,13 @@
 import { useEffect, useState } from "react";
 import { couleurFilm, formatDuree, lireJsonSecurise } from "@/lib/planning-utils";
 
-type Film = { id: string; titre: string; dureeMinutes: number; classification: string | null };
+type Film = {
+  id: string;
+  titre: string;
+  dureeMinutes: number;
+  classification: string | null;
+  seancesParSemaine: number;
+};
 
 const OPTIONS_CLASSIFICATION = [
   { valeur: "", label: "Tous publics" },
@@ -23,17 +29,27 @@ export default function Films() {
   const [heures, setHeures] = useState("");
   const [minutes, setMinutes] = useState("");
   const [classification, setClassification] = useState("");
+  const [seancesParSemaine, setSeancesParSemaine] = useState("");
 
   function chargerFilms() {
     fetch("/api/films")
       .then(r => r.json())
-      .then(f => { setFilms(f); setChargement(false); });
+      .then(f => {
+        setFilms(f);
+        setChargement(false);
+      });
   }
-  useEffect(() => { chargerFilms(); }, []);
+  useEffect(() => {
+    chargerFilms();
+  }, []);
 
   function ouvrirNouveauFilm() {
     setFilmEnEdition(null);
-    setTitre(""); setHeures(""); setMinutes(""); setClassification("");
+    setTitre("");
+    setHeures("");
+    setMinutes("");
+    setClassification("");
+    setSeancesParSemaine("");
     setErreur("");
     setFormOuvert(true);
   }
@@ -44,6 +60,7 @@ export default function Films() {
     setHeures(String(Math.floor(f.dureeMinutes / 60)));
     setMinutes(String(f.dureeMinutes % 60));
     setClassification(f.classification ?? "");
+    setSeancesParSemaine(String(f.seancesParSemaine ?? 0));
     setErreur("");
     setFormOuvert(true);
   }
@@ -51,18 +68,35 @@ export default function Films() {
   async function enregistrer() {
     setErreur("");
     const dureeMinutes = (Number(heures) || 0) * 60 + (Number(minutes) || 0);
-    if (!titre.trim()) { setErreur("Le titre est obligatoire."); return; }
-    if (dureeMinutes <= 0) { setErreur("La durée doit être supérieure à 0."); return; }
+    if (!titre.trim()) {
+      setErreur("Le titre est obligatoire.");
+      return;
+    }
+    if (dureeMinutes <= 0) {
+      setErreur("La durée doit être supérieure à 0.");
+      return;
+    }
+    const quota = Number(seancesParSemaine);
+    if (!Number.isInteger(quota) || quota < 1) {
+      setErreur("Le nombre de séances par semaine est obligatoire (entier ≥ 1).");
+      return;
+    }
 
     if (filmEnEdition) {
       await fetch("/api/films", {
         method: "PATCH",
-        body: JSON.stringify({ id: filmEnEdition.id, titre, dureeMinutes, classification: classification || null }),
+        body: JSON.stringify({
+          id: filmEnEdition.id,
+          titre,
+          dureeMinutes,
+          classification: classification || null,
+          seancesParSemaine: quota,
+        }),
       });
     } else {
       const res = await fetch("/api/films", {
         method: "POST",
-        body: JSON.stringify({ titre, dureeMinutes, classification: classification || null }),
+        body: JSON.stringify({ titre, dureeMinutes, classification: classification || null, seancesParSemaine: quota }),
       });
       if (!res.ok) {
         const d = await lireJsonSecurise(res);
@@ -89,8 +123,8 @@ export default function Films() {
     <main>
       <h1>Films</h1>
       <p style={{ color: "var(--text-dim)" }}>
-        Chaque film devient une carte de couleur, réutilisable dans l'onglet{" "}
-        <a href="/programmation">Programmation</a> par glisser-déposer.
+        Chaque film devient une carte de couleur, réutilisable dans l'onglet <a href="/programmation">Programmation</a>{" "}
+        par glisser-déposer, et sert de base au quota utilisé par <a href="/generer">Générer</a>.
       </p>
 
       {erreur && <div className="alerte">{erreur}</div>}
@@ -107,11 +141,16 @@ export default function Films() {
             <div className="carte-film-corps">
               <h3>{f.titre}</h3>
               <p className="carte-film-duree">{formatDuree(f.dureeMinutes)}</p>
+              <p className="carte-film-duree">{f.seancesParSemaine} séance(s) / semaine</p>
               {f.classification && <span className="badge-classification">{f.classification}</span>}
             </div>
             <div className="carte-film-actions">
-              <button type="button" className="secondaire" onClick={() => ouvrirEditionFilm(f)}>Modifier</button>
-              <button type="button" className="secondaire" onClick={() => supprimerFilm(f.id)}>Supprimer</button>
+              <button type="button" className="secondaire" onClick={() => ouvrirEditionFilm(f)}>
+                Modifier
+              </button>
+              <button type="button" className="secondaire" onClick={() => supprimerFilm(f.id)}>
+                Supprimer
+              </button>
             </div>
           </div>
         ))}
@@ -137,18 +176,44 @@ export default function Films() {
               </div>
               <div className="champ">
                 <label>Minutes</label>
-                <input type="number" min={0} max={59} value={minutes} onChange={e => setMinutes(e.target.value)} style={{ width: "5rem" }} />
+                <input
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={minutes}
+                  onChange={e => setMinutes(e.target.value)}
+                  style={{ width: "5rem" }}
+                />
               </div>
               <div className="champ">
                 <label>Accessibilité</label>
                 <select value={classification} onChange={e => setClassification(e.target.value)}>
-                  {OPTIONS_CLASSIFICATION.map(o => <option key={o.valeur} value={o.valeur}>{o.label}</option>)}
+                  {OPTIONS_CLASSIFICATION.map(o => (
+                    <option key={o.valeur} value={o.valeur}>
+                      {o.label}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
+            <div className="champ">
+              <label>Séances requises / semaine *</label>
+              <input
+                type="number"
+                min={1}
+                required
+                value={seancesParSemaine}
+                onChange={e => setSeancesParSemaine(e.target.value)}
+                style={{ width: "6rem" }}
+              />
+            </div>
             <div className="ligne" style={{ marginTop: "1rem", justifyContent: "flex-end" }}>
-              <button type="button" className="secondaire" onClick={() => setFormOuvert(false)}>Annuler</button>
-              <button type="button" onClick={enregistrer}>Enregistrer</button>
+              <button type="button" className="secondaire" onClick={() => setFormOuvert(false)}>
+                Annuler
+              </button>
+              <button type="button" onClick={enregistrer}>
+                Enregistrer
+              </button>
             </div>
           </div>
         </div>

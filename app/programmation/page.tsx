@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { couleurFilm, formatDuree, minutesVersHeure, heureVersMinutes, trouverConflit, MINUTES_JOUR, lireJsonSecurise } from "@/lib/planning-utils";
 
-type Film = { id: string; titre: string; dureeMinutes: number; classification: string | null };
+type Film = { id: string; titre: string; dureeMinutes: number; classification: string | null; seancesParSemaine: number };
 type Placement = {
   id: string;
+  semaine: number;
   jour: string;
   salleIndex: number;
   heureDebut: number;
@@ -39,8 +40,14 @@ function minutesDepuisPosition(rect: DOMRect, clientX: number): number {
 
 export default function Programmation() {
   const [films, setFilms] = useState<Film[]>([]);
+  const [semaine, setSemaine] = useState<1 | 2>(1);
   const [jour, setJour] = useState(JOURS[0].valeur);
-  const [placements, setPlacements] = useState<Placement[]>([]);
+
+  // Placements de TOUTE la semaine sélectionnée (7 jours) : sert à la fois à la
+  // frise du jour courant (filtré côté client) et aux compteurs de séances
+  // restantes, qui portent sur la semaine entière — voir cahier des charges §5 :
+  // "les compteurs doivent conserver leurs valeurs" en changeant de jour.
+  const [placementsSemaine, setPlacementsSemaine] = useState<Placement[]>([]);
   const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState("");
 
@@ -55,24 +62,31 @@ export default function Programmation() {
     fetch("/api/films").then(r => r.json()).then(setFilms);
   }, []);
 
-  async function chargerPlacements(j: string) {
+  async function chargerPlacementsSemaine(s: number) {
     setChargement(true);
-    const res = await fetch(`/api/placements?jour=${j}`);
+    const res = await fetch(`/api/placements?semaine=${s}`);
     const p = await lireJsonSecurise<Placement[]>(res);
     if (!res.ok || !p) {
-      setErreur(
-        (p as any)?.erreur ?? `Impossible de charger le planning de ce jour (${res.status}). Regarde le terminal du serveur pour le détail.`
-      );
-      setPlacements([]);
+      setErreur((p as any)?.erreur ?? `Impossible de charger le planning de cette semaine (${res.status}).`);
+      setPlacementsSemaine([]);
     } else {
-      setPlacements(p);
+      setPlacementsSemaine(p);
     }
     setChargement(false);
   }
-  useEffect(() => { chargerPlacements(jour); }, [jour]);
+  useEffect(() => {
+    chargerPlacementsSemaine(semaine);
+  }, [semaine]);
+
+  const placementsJour = placementsSemaine.filter(p => p.jour === jour);
 
   function placementsSalle(salleIndex: number) {
-    return placements.filter(p => p.salleIndex === salleIndex);
+    return placementsJour.filter(p => p.salleIndex === salleIndex);
+  }
+
+  function seancesRestantes(film: Film): number {
+    const nbPlacees = placementsSemaine.filter(p => p.film.id === film.id).length;
+    return Math.max(0, film.seancesParSemaine - nbPlacees);
   }
 
   function calculerConflit(salleIndex: number, heureDebut: number, dureeMinutes: number, ignorerId?: string) {
@@ -82,6 +96,10 @@ export default function Programmation() {
 
   // --- Démarrage d'un glisser depuis la palette de films ---
   function debuterDragNouveau(e: DragEvent, film: Film) {
+    if (seancesRestantes(film) <= 0) {
+      e.preventDefault();
+      return;
+    }
     e.dataTransfer.setData("text/plain", film.id);
     e.dataTransfer.effectAllowed = "copy";
     setDragInfo({ type: "nouveau", filmId: film.id, titre: film.titre, dureeMinutes: film.dureeMinutes });
@@ -114,16 +132,18 @@ export default function Programmation() {
 
     if (heureDebut + dragInfo.dureeMinutes > MINUTES_JOUR) {
       setErreur(`"${dragInfo.titre}" dépasserait minuit à cette heure de début — choisis une heure plus tôt.`);
-      setDragInfo(null); setFantome(null);
+      setDragInfo(null);
+      setFantome(null);
       return;
     }
 
     const ignorerId = dragInfo.type === "deplacement" ? dragInfo.placementId : undefined;
     const conflit = calculerConflit(salleIndex, heureDebut, dragInfo.dureeMinutes, ignorerId);
     if (conflit) {
-      const filmConflit = placements.find(p => p.id === conflit.id)?.film.titre ?? "une autre séance";
+      const filmConflit = placementsJour.find(p => p.id === conflit.id)?.film.titre ?? "une autre séance";
       setErreur(`Impossible de placer "${dragInfo.titre}" ici : chevauchement avec "${filmConflit}" dans ${NOMS_SALLES[salleIndex]}.`);
-      setDragInfo(null); setFantome(null);
+      setDragInfo(null);
+      setFantome(null);
       return;
     }
 
@@ -131,25 +151,25 @@ export default function Programmation() {
     if (dragInfo.type === "nouveau") {
       const res = await fetch("/api/placements", {
         method: "POST",
-        body: JSON.stringify({ jour, salleIndex, heureDebut, filmId: dragInfo.filmId }),
+        body: JSON.stringify({ semaine, jour, salleIndex, heureDebut, filmId: dragInfo.filmId }),
       });
       const d = await lireJsonSecurise(res);
       if (res.ok && d) {
-        setPlacements(prev => [...prev, d]);
+        setPlacementsSemaine(prev => [...prev, d as Placement]); // décrémente le compteur (recalculé au rendu)
       } else {
-        setErreur(d?.erreur ?? `Impossible de placer ce film (${res.status}). Regarde le terminal du serveur pour le détail.`);
+        setErreur((d as any)?.erreur ?? `Impossible de placer ce film (${res.status}).`);
       }
     } else {
       // mise à jour optimiste
-      setPlacements(prev => prev.map(p => (p.id === dragInfo.placementId ? { ...p, salleIndex, heureDebut } : p)));
+      setPlacementsSemaine(prev => prev.map(p => (p.id === dragInfo.placementId ? { ...p, salleIndex, heureDebut } : p)));
       const res = await fetch(`/api/placements/${dragInfo.placementId}`, {
         method: "PATCH",
         body: JSON.stringify({ salleIndex, heureDebut }),
       });
       if (!res.ok) {
         const d = await lireJsonSecurise(res);
-        setErreur(d?.erreur ?? `Impossible de déplacer ce film (${res.status}).`);
-        chargerPlacements(jour); // annule la mise à jour optimiste en cas d'échec
+        setErreur((d as any)?.erreur ?? `Impossible de déplacer ce film (${res.status}).`);
+        chargerPlacementsSemaine(semaine); // annule la mise à jour optimiste en cas d'échec
       }
     }
     setDragInfo(null);
@@ -163,7 +183,7 @@ export default function Programmation() {
 
   async function supprimerPlacement(id: string) {
     setErreur("");
-    setPlacements(prev => prev.filter(p => p.id !== id));
+    setPlacementsSemaine(prev => prev.filter(p => p.id !== id)); // le compteur remonte automatiquement
     await fetch(`/api/placements/${id}`, { method: "DELETE" });
     if (editionId === id) setEditionId(null);
   }
@@ -183,12 +203,14 @@ export default function Programmation() {
     });
     const d = await lireJsonSecurise(res);
     if (res.ok && d) {
-      setPlacements(prev => prev.map(x => (x.id === p.id ? d : x)));
+      setPlacementsSemaine(prev => prev.map(x => (x.id === p.id ? (d as Placement) : x)));
       setEditionId(null);
     } else {
-      setErreur(d?.erreur ?? "Heure invalide.");
+      setErreur((d as any)?.erreur ?? "Heure invalide.");
     }
   }
+
+  const filmsProgrammables = films.filter(f => f.seancesParSemaine > 0);
 
   return (
     <main>
@@ -197,6 +219,19 @@ export default function Programmation() {
         Glisse un film depuis la palette vers l'une des deux salles. Glisse un film déjà placé pour le déplacer.
         Clique sur son horaire pour le régler précisément.
       </p>
+
+      <div className="selecteur-jours" style={{ marginBottom: "0.5rem" }}>
+        {[1, 2].map(s => (
+          <button
+            key={s}
+            type="button"
+            className={s === semaine ? "jour-actif" : "jour-inactif"}
+            onClick={() => setSemaine(s as 1 | 2)}
+          >
+            Semaine {s}
+          </button>
+        ))}
+      </div>
 
       <div className="selecteur-jours">
         {JOURS.map(j => (
@@ -214,26 +249,31 @@ export default function Programmation() {
       {erreur && <div className="alerte">{erreur}</div>}
 
       <section className="panneau">
-        <h2>Films disponibles</h2>
-        {films.length === 0 ? (
+        <h2>Films disponibles — Semaine {semaine}</h2>
+        {filmsProgrammables.length === 0 ? (
           <p style={{ color: "var(--text-dim)" }}>
-            Aucun film pour l'instant — ajoute-en dans l'onglet <a href="/films">Films</a>.
+            Aucun film avec un quota de séances par semaine — règle-le dans l'onglet <a href="/films">Films</a>.
           </p>
         ) : (
           <div className="palette-films">
-            {films.map(f => (
-              <div
-                key={f.id}
-                className="carte-palette"
-                style={{ background: couleurFilm(f.id) }}
-                draggable
-                onDragStart={e => debuterDragNouveau(e, f)}
-                onDragEnd={finDrag}
-              >
-                <span className="carte-palette-titre">{f.titre}</span>
-                <span className="carte-palette-duree">{formatDuree(f.dureeMinutes)}</span>
-              </div>
-            ))}
+            {filmsProgrammables.map(f => {
+              const restantes = seancesRestantes(f);
+              return (
+                <div
+                  key={f.id}
+                  className="carte-palette"
+                  style={{ background: couleurFilm(f.id), opacity: restantes <= 0 ? 0.4 : 1 }}
+                  draggable={restantes > 0}
+                  onDragStart={e => debuterDragNouveau(e, f)}
+                  onDragEnd={finDrag}
+                  title={restantes <= 0 ? "Quota de la semaine atteint" : undefined}
+                >
+                  <span className="carte-palette-titre">{f.titre}</span>
+                  <span className="carte-palette-duree">{formatDuree(f.dureeMinutes)}</span>
+                  <span className="carte-palette-duree">{restantes} / {f.seancesParSemaine} restantes</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
@@ -246,12 +286,16 @@ export default function Programmation() {
             <h2>{NOMS_SALLES[salleIndex]}</h2>
             <div className="reperes-heures">
               {REPERES_HEURES.map(h => (
-                <span key={h} className="repere-heure">{String(h).padStart(2, "0")}</span>
+                <span key={h} className="repere-heure">
+                  {String(h).padStart(2, "0")}
+                </span>
               ))}
             </div>
             <div
               className="bande-horaire"
-              ref={el => { bandeRefs.current[salleIndex] = el; }}
+              ref={el => {
+                bandeRefs.current[salleIndex] = el;
+              }}
               onDragOver={e => survolBande(e, salleIndex)}
               onDrop={e => deposerSurBande(e, salleIndex)}
               onDragLeave={() => setFantome(f => (f?.salleIndex === salleIndex ? null : f))}
@@ -275,12 +319,7 @@ export default function Programmation() {
                     onDragStart={e => debuterDragDeplacement(e, p)}
                     onDragEnd={finDrag}
                   >
-                    <button
-                      type="button"
-                      className="bloc-seance-supprimer"
-                      onClick={() => supprimerPlacement(p.id)}
-                      title="Supprimer cette séance"
-                    >
+                    <button type="button" className="bloc-seance-supprimer" onClick={() => supprimerPlacement(p.id)} title="Supprimer cette séance">
                       ×
                     </button>
                     <span className="bloc-seance-titre">{p.film.titre}</span>
@@ -292,8 +331,12 @@ export default function Programmation() {
                       <div className="popover-heure" onClick={e => e.stopPropagation()}>
                         <input type="time" value={heureEdition} onChange={e => setHeureEdition(e.target.value)} />
                         <div className="ligne" style={{ marginTop: "0.4rem" }}>
-                          <button type="button" className="secondaire" onClick={() => setEditionId(null)}>Annuler</button>
-                          <button type="button" onClick={() => validerEdition(p)}>Valider</button>
+                          <button type="button" className="secondaire" onClick={() => setEditionId(null)}>
+                            Annuler
+                          </button>
+                          <button type="button" onClick={() => validerEdition(p)}>
+                            Valider
+                          </button>
                         </div>
                       </div>
                     )}

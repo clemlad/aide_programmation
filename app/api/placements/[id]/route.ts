@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { trouverConflit, MINUTES_JOUR } from "@/lib/planning-utils";
+import { fenetresEvenements, filmRespecteEvenement } from "@/lib/scheduler-config";
 
 function messageErreur(err: unknown): string {
   if (err instanceof Error) return err.message;
   return "Erreur inconnue côté serveur.";
 }
 
-// PATCH { salleIndex?, heureDebut? } → déplace une séance déjà placée (le jour ne change pas ici :
-// on supprime/recrée depuis l'UI pour changer de jour, plus simple à raisonner)
+// PATCH { salleIndex?, heureDebut? } → déplace une séance déjà placée (le jour et
+// la semaine ne changent pas ici : on supprime/recrée depuis l'UI pour ça).
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
   try {
     const body = await req.json();
@@ -29,8 +30,21 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
       );
     }
 
+    // Mêmes règles que la création : événements spéciaux d'abord.
+    const fin = heureDebut + duree;
+    for (const fenetre of fenetresEvenements(existant.jour as any, salleIndex)) {
+      const chevauche = heureDebut < fenetre.fin && fenetre.debut < fin;
+      if (!chevauche) continue;
+      if (!filmRespecteEvenement(existant.film.classification, fenetre.event)) {
+        const msg = fenetre.event.reserve
+          ? `Cette salle est réservée par l'événement "${fenetre.event.nom}" à cet horaire.`
+          : `Seuls les films tous publics sont autorisés à cet horaire (événement "${fenetre.event.nom}").`;
+        return NextResponse.json({ erreur: msg }, { status: 409 });
+      }
+    }
+
     const autres = await prisma.placement.findMany({
-      where: { jour: existant.jour, salleIndex, NOT: { id: existant.id } },
+      where: { semaine: existant.semaine, jour: existant.jour, salleIndex, NOT: { id: existant.id } },
       include: { film: true },
     });
     const conflit = trouverConflit(
@@ -40,7 +54,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     if (conflit) {
       const filmConflit = autres.find(p => p.id === conflit.id)?.film.titre ?? "une autre séance";
       return NextResponse.json(
-        { erreur: `Chevauchement avec "${filmConflit}" dans cette salle à ce moment-là.` },
+        { erreur: `"${existant.film.titre}" est trop proche de "${filmConflit}" dans cette salle (marge minimale non respectée).` },
         { status: 409 }
       );
     }

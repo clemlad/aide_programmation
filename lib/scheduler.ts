@@ -1,43 +1,50 @@
-// Moteur de génération automatique du planning (v6)
+// Moteur de génération automatique du planning (v9)
 //
-// Modèle : 4 blocs fixes par jour et par salle (matin, aprem, soir1, soir2),
-// UN SEUL FILM par (jour, salle, bloc) — pas d'enchaînement libre à l'intérieur d'un bloc.
+// Changements v9 par rapport à v8 :
+// - Les blocs/horaires/événements ne sont plus définis ici : ils viennent de
+//   lib/scheduler-config.ts, PARTAGÉ avec la validation des placements manuels
+//   (app/api/placements/*). Objectif : une seule règle métier, pas deux copies
+//   qui divergent (cahier des charges V9, "mêmes règles métiers").
+// - La marge minimale entre deux films d'une même salle vient de
+//   lib/planning-utils.ts (MARGE_MIN_ENTRE_FILMS), pour la même raison.
+// - Les événements spéciaux peuvent maintenant s'appliquer à une seule salle et/ou
+//   réserver une salle sans y placer de film (`reserve: true`).
 //
-// Ajustement d'horaire : si l'horaire de base d'un bloc est trop proche de la fin du
-// film du bloc précédent (même salle, même jour), on décale de 15 min ; si ça ne
-// suffit toujours pas, de 30 min. Le plus petit décalage suffisant est toujours choisi.
+// Priorités respectées, dans cet ordre (cahier des charges V9) :
+//   1. Événements spéciaux         2. Quotas hebdomadaires (jamais dépassés)
+//   3. Marge minimale entre films  4. Durée des films (pas de chevauchement)
+//   5. Contraintes des salles (pas de départ simultané, sauf exception)
+//   6. Horaires de référence       7. Ajustement minimal si nécessaire
+//   8. Répartition intelligente sur la semaine
 //
-// Classification :
-// - Un film "tous publics" (classification null) ne peut jamais jouer sur le bloc
-//   "soir2" (dernière séance du soir).
-// - Les blocs du soir (soir1, soir2) sont prioritaires pour les films classifiés
-//   (12/16/18) ; les blocs de jour (matin, aprem) sont prioritaires pour les films
-//   tous publics. C'est une PRÉFÉRENCE, pas une exclusion : si aucun film approprié
-//   n'a de quota restant sur un bloc donné, un film moins "approprié" peut y être
-//   placé pour honorer une forte demande de séances.
+// Note d'implémentation : les règles 2 à 5 ne sont pas séquentielles au sens où
+// l'algorithme les appliquerait l'une après l'autre — elles portent sur deux axes
+// indépendants (QUEL film vs QUAND) et sont donc appliquées simultanément :
+// l'horaire est déterminé par la marge/les salles (règles 3-5), le film par le
+// quota (règle 2). Aucune des deux ne peut être violée, il n'y a donc pas
+// d'arbitrage réel à faire entre elles dans ce modèle.
 
-export type Jour = "MERCREDI" | "JEUDI" | "VENDREDI" | "SAMEDI" | "DIMANCHE" | "LUNDI" | "MARDI";
-const JOURS: Jour[] = ["MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE", "LUNDI", "MARDI"];
+import { heureVersMinutes, minutesVersHeure, MARGE_MIN_ENTRE_FILMS } from "@/lib/planning-utils";
+import {
+  JOURS,
+  NB_SALLES,
+  BLOCS,
+  OFFSETS_MINUTES,
+  evenementPourBlocSalle,
+  filmRespecteEvenement,
+  heureIdentiqueAutorisee,
+  type Jour,
+  type NomBloc,
+} from "@/lib/scheduler-config";
 
-const NB_SALLES = 2;
-
-// Horaires de base : [Salle 1, Salle 2] pour chaque bloc, dans l'ordre chronologique.
-const BLOCS: { nom: string; horaires: [string, string] }[] = [
-  { nom: "matin", horaires: ["11:00", "11:00"] },
-  { nom: "aprem", horaires: ["15:30", "15:45"] },
-  { nom: "soir1", horaires: ["18:00", "18:15"] },
-  { nom: "soir2", horaires: ["20:45", "21:00"] },
-];
-
-const DECALAGES_MINUTES = [0, 15, 30]; // essayés dans cet ordre ; le premier qui convient est retenu
-const MARGE_SOUHAITEE_MIN = 15; // battement désiré entre la fin d'un film et le début du suivant — [Guessing], à ajuster si besoin
+export type { Jour };
 
 export type FilmAvecQuota = {
   id: string;
   titre: string;
   dureeMinutes: number;
-  nbSeancesSouhaite: number;
-  classification?: string; // absent/null = tous publics ; sinon "12", "16", "18"
+  seancesParSemaine: number;
+  classification?: string | null;
 };
 
 export type SeanceGeneree = {
@@ -46,12 +53,13 @@ export type SeanceGeneree = {
   jour: Jour;
   blocNom: string;
   heureDebut: string;
-  semaine: string;
+  semaine: number; // 1 ou 2
 };
 
 export type FilmNonComplet = {
   filmId: string;
   titre: string;
+  semaine: number;
   seancesRestantes: number;
 };
 
@@ -60,102 +68,117 @@ export type ResultatGeneration = {
   filmsNonComplets: FilmNonComplet[];
 };
 
-function heureEnMinutes(heure: string): number {
-  const [h, m] = heure.split(":").map(Number);
-  return h * 60 + m;
-}
-function minutesEnHeure(minutes: number): string {
-  const h = Math.floor(minutes / 60) % 24;
-  const m = minutes % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
 function estTousPublics(film: FilmAvecQuota): boolean {
   return !film.classification;
 }
 
-/** Un film tous publics ne peut jamais jouer sur le bloc "soir2". */
-function filmEligible(film: FilmAvecQuota, nomBloc: string): boolean {
+/** Un film tous publics ne joue jamais sur le bloc "soir2" (règle héritée, conservée car non contredite en V9). */
+function filmEligibleBloc(film: FilmAvecQuota, nomBloc: NomBloc): boolean {
   if (nomBloc === "soir2" && estTousPublics(film)) return false;
   return true;
 }
 
-/** 0 = créneau idéal pour ce film, 1 = acceptable seulement si rien de mieux n'est disponible. */
-function scoreAppropriateness(film: FilmAvecQuota, nomBloc: string): number {
+/** 0 = créneau idéal pour ce film, 1 = acceptable seulement si rien de mieux n'a de quota restant. */
+function scoreAppropriateness(film: FilmAvecQuota, nomBloc: NomBloc): number {
   const estSoir = nomBloc === "soir1" || nomBloc === "soir2";
   if (estSoir) return estTousPublics(film) ? 1 : 0;
   return estTousPublics(film) ? 0 : 1;
 }
 
-export function genererPlanning(
+/** Génère la programmation d'UNE semaine indépendante (quotas remis à zéro à l'entrée). */
+function genererUneSemaine(
   films: FilmAvecQuota[],
-  semaines: string[]
-): ResultatGeneration {
-  if (films.length === 0) throw new Error("Aucun film fourni.");
-
-  const seancesPlaceesParFilm = new Map<string, number>(films.map(f => [f.id, 0]));
+  numeroSemaine: number
+): { seances: SeanceGeneree[]; quotasRestants: Map<string, number> } {
+  const quotasRestants = new Map<string, number>(films.map(f => [f.id, f.seancesParSemaine]));
   const seances: SeanceGeneree[] = [];
 
-  function choisirFilm(nomBloc: string): FilmAvecQuota | null {
+  function choisirFilm(nomBloc: NomBloc, event: ReturnType<typeof evenementPourBlocSalle>): FilmAvecQuota | null {
     const candidats = films
-      .filter(f => filmEligible(f, nomBloc))
-      .filter(f => (seancesPlaceesParFilm.get(f.id) ?? 0) < f.nbSeancesSouhaite)
+      .filter(f => filmEligibleBloc(f, nomBloc))
+      .filter(f => filmRespecteEvenement(f.classification, event))
+      .filter(f => (quotasRestants.get(f.id) ?? 0) > 0) // priorité 2 : jamais de film sans quota restant
       .sort((a, b) => {
         const scoreA = scoreAppropriateness(a, nomBloc);
         const scoreB = scoreAppropriateness(b, nomBloc);
-        if (scoreA !== scoreB) return scoreA - scoreB; // le plus approprié d'abord
-        const restantA = a.nbSeancesSouhaite - (seancesPlaceesParFilm.get(a.id) ?? 0);
-        const restantB = b.nbSeancesSouhaite - (seancesPlaceesParFilm.get(b.id) ?? 0);
-        return restantB - restantA; // à égalité d'à-propos, le plus en retard sur son quota d'abord
+        if (scoreA !== scoreB) return scoreA - scoreB;
+        const restantA = (quotasRestants.get(a.id) ?? 0) / Math.max(1, a.seancesParSemaine);
+        const restantB = (quotasRestants.get(b.id) ?? 0) / Math.max(1, b.seancesParSemaine);
+        return restantB - restantA; // le plus en retard sur son quota d'abord
       });
     return candidats[0] ?? null;
   }
 
-  for (const semaine of semaines) {
-    for (const jour of JOURS) {
+  for (const jour of JOURS) {
+    // Réinitialisé à chaque jour : la chaîne de films d'une salle ne s'étend jamais d'un jour sur l'autre.
+    const finFilmPrecedent: [number | null, number | null] = [null, null];
+
+    for (const bloc of BLOCS) {
+      const identiqueOk = heureIdentiqueAutorisee(jour, bloc.nom);
+      let heureChoisieSalle0: number | null = null;
+
       for (let salleIndex = 0; salleIndex < NB_SALLES; salleIndex++) {
-        let finFilmPrecedent: number | null = null; // minutes depuis minuit, dans cette salle/jour
+        const event = evenementPourBlocSalle(jour, bloc.nom, salleIndex);
 
-        for (const bloc of BLOCS) {
-          const horaireBase = heureEnMinutes(bloc.horaires[salleIndex]);
-
-          // Choisit le plus petit décalage (0, 15 ou 30 min) qui respecte la marge
-          // souhaitée par rapport à la fin du film précédent dans cette salle.
-          let horaireChoisi: number | null = null;
-          for (const decalage of DECALAGES_MINUTES) {
-            const candidat = horaireBase + decalage;
-            if (finFilmPrecedent === null || candidat - finFilmPrecedent >= MARGE_SOUHAITEE_MIN) {
-              horaireChoisi = candidat;
-              break;
-            }
-          }
-          if (horaireChoisi === null) continue; // même +30 min ne suffit pas : bloc laissé vide ce jour-là
-
-          const film = choisirFilm(bloc.nom);
-          if (!film) continue; // aucun film éligible avec du quota restant : bloc laissé vide
-
-          seances.push({
-            filmId: film.id,
-            salleIndex,
-            jour,
-            blocNom: bloc.nom,
-            heureDebut: minutesEnHeure(horaireChoisi),
-            semaine,
-          });
-          seancesPlaceesParFilm.set(film.id, (seancesPlaceesParFilm.get(film.id) ?? 0) + 1);
-          finFilmPrecedent = horaireChoisi + film.dureeMinutes;
+        if (event?.reserve) {
+          continue; // priorité 1 : salle réservée par un événement, aucun film n'y est placé
         }
+
+        const heureBase = heureVersMinutes(event?.heureDebut ?? bloc.horaires[salleIndex]);
+        const precedent = finFilmPrecedent[salleIndex];
+
+        let heureChoisie: number | null = null;
+        for (const offset of OFFSETS_MINUTES) {
+          const candidat = heureBase + offset;
+          if (precedent !== null && candidat - precedent < MARGE_MIN_ENTRE_FILMS) continue; // priorité 3 : marge minimale
+          if (!identiqueOk && salleIndex === 1 && heureChoisieSalle0 !== null && candidat === heureChoisieSalle0) {
+            continue; // priorité 5 : interdit que les 2 salles démarrent en même temps
+          }
+          heureChoisie = candidat;
+          break;
+        }
+        if (heureChoisie === null) continue; // aucun horaire valable : bloc laissé vide pour cette salle
+
+        const film = choisirFilm(bloc.nom, event);
+        if (!film) continue; // aucun film éligible avec du quota restant
+
+        seances.push({
+          filmId: film.id,
+          salleIndex,
+          jour,
+          blocNom: bloc.nom,
+          heureDebut: minutesVersHeure(heureChoisie),
+          semaine: numeroSemaine,
+        });
+        quotasRestants.set(film.id, (quotasRestants.get(film.id) ?? 0) - 1);
+        finFilmPrecedent[salleIndex] = heureChoisie + film.dureeMinutes; // priorité 4 : durée du film respectée
+        if (salleIndex === 0) heureChoisieSalle0 = heureChoisie;
       }
     }
   }
 
-  const filmsNonComplets: FilmNonComplet[] = films
-    .map(f => ({
-      filmId: f.id,
-      titre: f.titre,
-      seancesRestantes: f.nbSeancesSouhaite - (seancesPlaceesParFilm.get(f.id) ?? 0),
-    }))
-    .filter(f => f.seancesRestantes > 0);
+  return { seances, quotasRestants };
+}
 
-  return { seances, filmsNonComplets };
+export function genererPlanning(films: FilmAvecQuota[]): ResultatGeneration {
+  if (films.length === 0) throw new Error("Aucun film fourni.");
+
+  const toutesLesSeances: SeanceGeneree[] = [];
+  const filmsNonComplets: FilmNonComplet[] = [];
+
+  // Deux semaines totalement indépendantes : chaque appel repart d'une Map de
+  // quotas neuve (genererUneSemaine), donc les quotas "reviennent automatiquement"
+  // à leur valeur d'origine pour la semaine 2 — rien à réinitialiser à la main.
+  for (const numeroSemaine of [1, 2]) {
+    const { seances, quotasRestants } = genererUneSemaine(films, numeroSemaine);
+    toutesLesSeances.push(...seances);
+    for (const f of films) {
+      const restantes = quotasRestants.get(f.id) ?? 0;
+      if (restantes > 0) {
+        filmsNonComplets.push({ filmId: f.id, titre: f.titre, semaine: numeroSemaine, seancesRestantes: restantes });
+      }
+    }
+  }
+
+  return { seances: toutesLesSeances, filmsNonComplets };
 }
