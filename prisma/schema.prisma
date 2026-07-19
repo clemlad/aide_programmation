@@ -1,8 +1,12 @@
-// Schéma Prisma — programmation cinéma (v6)
+// Schéma Prisma — programmation cinéma (v7)
 //
-// Plus de tables de configuration (Salle, Bloc, BlocHoraireDefaut, ExceptionHoraire) :
-// les 2 salles et les 4 blocs horaires fixes sont codés en dur dans lib/scheduler.ts.
-// Rien à configurer via l'UI — seuls Film et Seance persistent.
+// v6 : génération automatique par quotas (Film, Semaine, Seance — 4 blocs fixes).
+// v7 : ajout de Placement, pour le mode manuel "Programmation" (glisser-déposer,
+// horaire libre à la minute, indépendant des blocs et des semaines ISO — un
+// Placement est rattaché à un jour de la semaine (récurrent), pas à une date précise).
+//
+// Les deux modes coexistent et ne se marchent pas dessus : Seance appartient au
+// générateur automatique, Placement au mode manuel.
 
 generator client {
   provider = "prisma-client-js"
@@ -21,6 +25,7 @@ model Film {
   createdAt      DateTime @default(now())
 
   seances        Seance[]
+  placements     Placement[]
 }
 
 model Semaine {
@@ -59,4 +64,21 @@ model Seance {
   semaineId   String
 
   @@unique([salleIndex, blocNom, jour, semaineId])
+}
+
+// Séance placée à la main dans l'onglet "Programmation" (glisser-déposer).
+// Récurrente par jour de la semaine — pas de notion de semaine ISO ni de bloc :
+// l'heure de début est libre, à la minute près, sur 00:00-23:59.
+model Placement {
+  id         String   @id @default(cuid())
+  jour       Jour
+  salleIndex Int      // 0 = Salle 1, 1 = Salle 2
+  heureDebut Int      // minutes depuis minuit (0-1439)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  film       Film     @relation(fields: [filmId], references: [id], onDelete: Cascade)
+  filmId     String
+
+  @@index([jour, salleIndex])
 }

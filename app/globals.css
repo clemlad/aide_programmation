@@ -161,3 +161,254 @@ td {
   font-size: 0.7rem;
   margin-left: 0.3rem;
 }
+
+/* ===================================================================== */
+/* Onglet Films — cartes visuelles                                       */
+/* ===================================================================== */
+
+.grille-cartes-films {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.carte-film {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.carte-film:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.35); }
+
+.carte-film-bandeau { height: 0.5rem; }
+
+.carte-film-corps { padding: 1rem 1.1rem 0.6rem; flex: 1; }
+.carte-film-corps h3 { margin: 0 0 0.35rem; font-size: 1.1rem; }
+.carte-film-duree {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.carte-film-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.8rem 1.1rem 1rem;
+}
+.carte-film-actions button { flex: 1; font-size: 0.8rem; padding: 0.4rem 0.5rem; }
+
+.carte-film--ajout {
+  background: transparent;
+  border: 2px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 140px;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+}
+.carte-film--ajout:hover { border-color: var(--accent); color: var(--accent); }
+.carte-film-plus { font-size: 2rem; line-height: 1; }
+
+.fond-modale {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 1rem;
+}
+.modale {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 420px;
+}
+
+/* ===================================================================== */
+/* Onglet Programmation — frise horaire drag & drop                       */
+/* ===================================================================== */
+
+.selecteur-jours {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+.selecteur-jours button {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.5rem 0.9rem;
+}
+.jour-inactif {
+  background: var(--bg-panel-raised);
+  color: var(--text-dim);
+}
+.jour-inactif:hover { color: var(--text); }
+.jour-actif { background: var(--accent); color: #1a1408; }
+
+.palette-films {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+.carte-palette {
+  padding: 0.6rem 1rem;
+  border-radius: 5px;
+  color: #fff;
+  cursor: grab;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 130px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  user-select: none;
+}
+.carte-palette:active { cursor: grabbing; }
+.carte-palette-titre { font-weight: 700; font-size: 0.92rem; }
+.carte-palette-duree { font-family: var(--font-mono); font-size: 0.75rem; opacity: 0.85; }
+
+.reperes-heures {
+  display: flex;
+  padding: 0 0.25rem;
+  margin-top: 1rem;
+}
+.repere-heure {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  text-align: left;
+}
+
+.bande-horaire {
+  position: relative;
+  height: 5.5rem;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: visible;
+  margin-top: 0.25rem;
+}
+
+.trait-heure {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.bloc-seance {
+  position: absolute;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  border-radius: 4px;
+  color: #fff;
+  padding: 0.3rem 0.5rem;
+  overflow: hidden;
+  cursor: grab;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 2.5rem;
+  transition: opacity 120ms ease;
+}
+.bloc-seance:active { cursor: grabbing; }
+.bloc-seance--fantomise { opacity: 0.35; }
+
+.bloc-seance-titre {
+  font-size: 0.8rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bloc-seance-horaire {
+  background: rgba(0,0,0,0.35);
+  border: none;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  align-self: flex-start;
+  cursor: pointer;
+}
+.bloc-seance-horaire:hover { background: rgba(0,0,0,0.55); }
+
+.bloc-seance-supprimer {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.25rem;
+  background: rgba(0,0,0,0.35);
+  color: #fff;
+  border: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  line-height: 1rem;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.bloc-seance-supprimer:hover { background: var(--danger); }
+
+.bloc-fantome {
+  position: absolute;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  border-radius: 4px;
+  border: 2px dashed rgba(232, 163, 61, 0.8);
+  background: rgba(232, 163, 61, 0.18);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.bloc-fantome--conflit {
+  border-color: rgba(224, 122, 95, 0.9);
+  background: rgba(224, 122, 95, 0.2);
+  color: var(--danger);
+}
+
+.popover-heure {
+  position: absolute;
+  top: -4.2rem;
+  left: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.6rem;
+  z-index: 10;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+  cursor: default;
+}
+.popover-heure input[type="time"] { width: 8rem; }
+.popover-heure button { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
+
+@media (max-width: 640px) {
+  .reperes-heures { display: none; }
+  .bande-horaire { overflow-x: auto; }
+}
