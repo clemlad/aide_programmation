@@ -1,8 +1,8 @@
-// Schéma Prisma — programmation cinéma (v3)
+// Schéma Prisma — programmation cinéma (v6)
 //
-// Principe : les horaires (blocs, heures par salle, exceptions jour/saison) sont
-// des RÉGLAGES PERSISTANTS configurés une fois et modifiés ponctuellement.
-// Seuls films + quotas + semaines sont saisis à chaque génération.
+// Plus de tables de configuration (Salle, Bloc, BlocHoraireDefaut, ExceptionHoraire) :
+// les 2 salles et les 4 blocs horaires fixes sont codés en dur dans lib/scheduler.ts.
+// Rien à configurer via l'UI — seuls Film et Seance persistent.
 
 generator client {
   provider = "prisma-client-js"
@@ -14,74 +14,13 @@ datasource db {
 }
 
 model Film {
-  id           String   @id @default(cuid())
-  titre        String
-  dureeMinutes Int
-  publicCible  String?  // ex: "ENFANT" — null = tout public, utilisé pour filtrer certains blocs
-  createdAt    DateTime @default(now())
-
-  seances      Seance[]
-}
-
-model Salle {
-  id        String   @id @default(cuid())
-  nom       String
-  createdAt DateTime @default(now())
-
-  horaires  BlocHoraireDefaut[]
-  seances   Seance[]
-}
-
-// Un bloc = un segment de la journée (matin, aprem, soir1, soir2...), sans horaire propre :
-// l'horaire dépend de la salle (voir BlocHoraireDefaut).
-model Bloc {
-  id    String @id @default(cuid())
-  nom   String // "matin", "aprem", "soir1", "soir2"
-  ordre Int    // tri chronologique
-
-  horaires   BlocHoraireDefaut[]
-  exceptions ExceptionHoraire[]
-  seances    Seance[]
-
-  @@unique([ordre])
-}
-
-// Horaire de départ par défaut d'un bloc, PROPRE À CHAQUE SALLE.
-// Ex: bloc "aprem" -> Salle 1 = 15:30, Salle 2 = 15:45
-model BlocHoraireDefaut {
-  id         String @id @default(cuid())
-  bloc       Bloc   @relation(fields: [blocId], references: [id])
-  blocId     String
-  salle      Salle  @relation(fields: [salleId], references: [id])
-  salleId    String
-  heureDebut String // "HH:mm"
-
-  @@unique([blocId, salleId])
-}
-
-enum Jour {
-  LUNDI
-  MARDI
-  MERCREDI
-  JEUDI
-  VENDREDI
-  SAMEDI
-  DIMANCHE
-}
-
-// Exception à l'horaire par défaut, pour un jour donné (et optionnellement une salle
-// et une période de l'année). Couvre le cas "jeudi en été, bloc matin à 10h30,
-// réservé aux films enfants" — mais reste générique pour tout autre cas futur.
-model ExceptionHoraire {
   id             String   @id @default(cuid())
-  jour           Jour
-  bloc           Bloc     @relation(fields: [blocId], references: [id])
-  blocId         String
-  salleId        String?  // null = s'applique à toutes les salles
-  heureDebut     String?  // null = pas de changement d'horaire, juste une contrainte de contenu
-  publicRequis   String?  // ex: "ENFANT" — restreint les films éligibles sur ce bloc/jour
-  periodeDebut   String?  // "MM-DD", ex "06-01" pour "période estivale" — null = toute l'année
-  periodeFin     String?  // "MM-DD", ex "08-31"
+  titre          String
+  dureeMinutes   Int
+  classification String?  // null = tous publics ; sinon "12", "16", "18" (âge minimum)
+  createdAt      DateTime @default(now())
+
+  seances        Seance[]
 }
 
 model Semaine {
@@ -95,23 +34,29 @@ model Semaine {
   @@unique([anneeIso, numeroIso])
 }
 
+enum Jour {
+  MERCREDI
+  JEUDI
+  VENDREDI
+  SAMEDI
+  DIMANCHE
+  LUNDI
+  MARDI
+}
+
 model Seance {
   id          String   @id @default(cuid())
   jour        Jour
-  heureDebut  String   // horaire réel calculé
-  genereAuto  Boolean  @default(true) // false si modifié manuellement après génération
+  salleIndex  Int      // 0 = Salle 1, 1 = Salle 2 (fixe, plus de table Salle)
+  blocNom     String   // "matin" | "aprem" | "soir1" | "soir2" (fixe, plus de table Bloc)
+  heureDebut  String   // horaire réel calculé, avec décalage éventuel (+15/+30 min)
+  genereAuto  Boolean  @default(true)
 
-  film        Film     @relation(fields: [filmId], references: [id])
+  film        Film     @relation(fields: [filmId], references: [id], onDelete: Cascade)
   filmId      String
 
-  salle       Salle    @relation(fields: [salleId], references: [id])
-  salleId     String
-
-  bloc        Bloc     @relation(fields: [blocId], references: [id])
-  blocId      String
-
-  semaine     Semaine  @relation(fields: [semaineId], references: [id])
+  semaine     Semaine  @relation(fields: [semaineId], references: [id], onDelete: Cascade)
   semaineId   String
 
-  @@unique([salleId, jour, semaineId, heureDebut])
+  @@unique([salleIndex, blocNom, jour, semaineId])
 }

@@ -1,73 +1,54 @@
-# Programmation cinéma — base du projet
+# Programmation cinéma
 
-## Ce qui est fourni ici
-- `package.json`, `tsconfig.json`, `next.config.mjs`, `app/layout.tsx`, `app/page.tsx` — squelette Next.js minimal qui affiche réellement une page (sans ça, Vercel build sans rien à servir et renvoie 404)
-- `prisma/schema.prisma` — modèle de données (Film, Salle, Bloc, BlocHoraireDefaut, ExceptionHoraire, Semaine, Séance)
-- `lib/scheduler.ts` — algorithme de placement automatique (quotas par film, blocs par salle, exceptions jour/saison)
+Application Next.js + Prisma/Postgres pour générer automatiquement le planning hebdomadaire d'un cinéma (2 salles, 4 blocs horaires fixes par jour) sous forme de tableau jour × film.
 
-Il manque encore : les pages "Réglages" et "Générer", l'API qui appelle `genererPlanning`, et la connexion réelle à la base de données.
+## Structure du projet
+- `prisma/schema.prisma` — modèle de données : seulement `Film`, `Semaine`, `Seance`. Salles et horaires ne sont plus des tables — ce sont des constantes dans le code.
+- `lib/scheduler.ts` — algorithme de placement automatique. **C'est le seul endroit où salles/blocs/horaires sont définis** (constantes `BLOCS`, `NB_SALLES` en tête de fichier).
+- `lib/prisma.ts` — client Prisma singleton
+- `app/api/films/` — CRUD films
+- `app/api/generer/` — génère et sauvegarde le planning
+- `app/generer/` — unique page d'usage : films, quotas de séances, semaines, tableau résultat
 
-## Étapes de mise en place
+Il n'y a plus de page "Réglages". Pour changer les horaires de base, les salles ou les blocs, il faut éditer les constantes en haut de `lib/scheduler.ts` directement.
 
-### 1. Récupérer le projet
-Copie tous les fichiers fournis (`package.json`, `tsconfig.json`, `next.config.mjs`, `app/`, `prisma/`, `lib/`) dans un dossier, puis :
-```bash
-cd cinema-scheduler
+## Mise en place
+
+### 1. Installer et lancer en local
+```powershell
 npm install
 npm run dev
 ```
-Va sur `http://localhost:3000` — tu dois voir la page "Programmation cinéma" s'afficher. Si oui, le squelette est sain avant même de toucher à Vercel.
 
-### 2. Pousser sur GitHub
-```bash
-git init
-git add .
-git commit -m "init: schéma + moteur de planning"
-gh repo create cinema-scheduler --private --source=. --push
-# ou manuellement: créer le repo sur github.com puis git remote add origin ... && git push
+### 2. Base de données (Neon via Vercel)
+```powershell
+npx prisma migrate dev --name v6_suppression_reglages
 ```
+**Attention** : cette migration supprime les tables `Salle`, `Bloc`, `BlocHoraireDefaut`, `ExceptionHoraire` et change la structure de `Seance`. Si tu as des séances de test déjà générées avec l'ancien modèle, elles seront perdues — sans conséquence si c'est encore un environnement de dev.
 
-### 3. Créer le projet sur Vercel
-1. Sur vercel.com → **Add New → Project** → importer le repo GitHub.
-2. **Vérifie "Root Directory"** dans les paramètres d'import : si `package.json` n'est pas à la racine du repo (ex: il est dans un sous-dossier `cinema-scheduler/`), Vercel doit pointer dessus explicitement, sinon build vide → 404 à nouveau.
-3. Ne clique pas encore sur Deploy — va d'abord à l'étape 4.
+### 3. GitHub → Vercel
+Inchangé par rapport aux étapes précédentes : push sur GitHub, importer le projet sur Vercel (Root Directory vide, Framework Preset = Next.js), `DATABASE_URL` injecté par l'intégration Neon.
 
-### 4. Ajouter la base Postgres (persistance)
-1. Dans le projet Vercel → onglet **Storage** → **Create Database** → **Postgres** (Neon).
-2. Vercel injecte automatiquement `DATABASE_URL` (et variantes) dans les variables d'environnement du projet — tu n'as rien à copier-coller.
+## Comment fonctionne la génération
 
-### 5. Adapter le build pour Prisma
-Dans `package.json`, ajoute :
-```json
-"scripts": {
-  "postinstall": "prisma generate",
-  "build": "prisma migrate deploy && next build"
-}
-```
-`prisma migrate deploy` applique les migrations en prod à chaque déploiement. En local, génère la première migration avec :
-```bash
-npx prisma migrate dev --name init
-```
-et commit le dossier `prisma/migrations` généré — Vercel en a besoin pour `migrate deploy`.
+**Horaires de base** (dans `lib/scheduler.ts`, constante `BLOCS`) :
+| Bloc | Salle 1 | Salle 2 |
+|---|---|---|
+| matin | 11h00 | 11h00 |
+| aprem | 15h30 | 15h45 |
+| soir1 | 18h00 | 18h15 |
+| soir2 | 20h45 | 21h00 |
 
-### 6. Déployer
-Reviens sur Vercel → **Deploy**. Chaque `git push` sur la branche principale redéploie automatiquement ensuite.
+Un seul film par (jour, salle, bloc) — pas d'enchaînement libre à l'intérieur d'un bloc.
 
-## Modèle v3 — ce qui a changé
-- Chaque bloc a un horaire de départ par défaut **propre à chaque salle** (`BlocHoraireDefaut`), pas un horaire partagé.
-- Table `ExceptionHoraire` : couvre les cas type "jeudi en été, bloc matin à 10h30, films enfants uniquement" sans coder de cas particulier en dur — n'importe quel (jour, bloc, période, salle) peut avoir sa propre exception d'horaire et/ou de public cible.
-- Plus de plafond de fermeture : le dernier bloc du jour s'enchaîne jusqu'à épuisement des quotas, sans heure limite.
-- Le champ `Seance.genereAuto` (déjà présent) permet de distinguer une séance générée automatiquement d'une séance décalée manuellement ensuite (ton cas "on pousse de 15 min pour laisser finir la séance d'avant") — l'algo ne gère pas cet ajustement automatiquement, c'est une correction humaine post-génération.
+**Ajustement automatique** : si l'horaire de base d'un bloc est trop proche de la fin du film du bloc précédent (même salle, même jour), l'horaire est décalé de +15 min ; si ça ne suffit toujours pas, +30 min. Le plus petit décalage suffisant est toujours choisi. Marge de battement désirée : 15 min (constante `MARGE_SOUHAITEE_MIN`, **[Guessing]**, à ajuster si ce n'est pas la bonne valeur).
 
-## Réglages vs saisie à chaque génération
-Ce qui devrait être un **réglage persistant** (configuré une fois, modifié rarement) :
-- Salles, blocs (matin/aprem/soir1/soir2), horaires par défaut par salle
-- Exceptions jour/saison
+**Classification et créneaux** :
+- Un film "tous publics" ne joue jamais sur le bloc `soir2` (dernière séance du soir).
+- Les blocs du soir (`soir1`, `soir2`) sont prioritaires pour les films classifiés (12/16/18) ; les blocs de jour (`matin`, `aprem`) sont prioritaires pour les films tous publics.
+- C'est une préférence, pas une règle stricte : si aucun film approprié n'a de quota restant sur un bloc, un film moins approprié peut y être placé pour honorer une forte demande de séances.
 
-Ce qui est **saisi à chaque génération** :
-- Films disponibles + durée + quota de séances souhaité par film
-- Semaine(s) à programmer
-
-## Points à trancher avant d'aller plus loin
-1. **Marge entre séances** : fixée à 20 min dans `scheduler.ts` (constante `margeMinutes`) — à confirmer.
-2. **Formulaire / pages** : pas encore construit. Prochaine étape logique : (a) une page "Réglages" pour salles/blocs/horaires/exceptions, (b) une page "Générer" pour films/quotas/semaines qui appelle `genererPlanning` et affiche le tableau + les `filmsNonComplets`.
+## Points encore ouverts
+- Marge de battement (15 min) et paliers de décalage (0/15/30) non exposés dans l'UI — modifiables seulement dans le code.
+- Pas de gestion des événements spéciaux ("Ciné P'tit Dej"), ni de l'exception saisonnière (jeudi été / films enfants) présente dans une version précédente — supprimée avec Réglages. À recoder en dur dans `scheduler.ts` si toujours nécessaire.
+- Cascade de suppression toujours active sur `Seance` : retirer un film retire ses séances déjà générées.

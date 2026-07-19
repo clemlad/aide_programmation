@@ -1,62 +1,52 @@
-// Moteur de génération automatique du planning (v3)
+// Moteur de génération automatique du planning (v6)
 //
-// Règles :
-// - Chaque bloc a un horaire de départ par défaut PROPRE À CHAQUE SALLE
-//   (ex: bloc "aprem" -> Salle 1 = 15:30, Salle 2 = 15:45).
-// - Des exceptions (jour + période de l'année, éventuellement salle) peuvent
-//   changer l'heure de départ d'un bloc et/ou imposer un public cible
-//   (ex: jeudi en été, bloc matin à 10h30, films enfants uniquement).
-// - À l'intérieur d'un bloc, les séances s'enchaînent selon la durée réelle
-//   des films + marge, jusqu'au début du bloc suivant DANS LA MÊME SALLE.
-//   Le dernier bloc du jour n'a pas de limite : le dernier film se termine
-//   quand il se termine.
-// - Chaque film a un quota de séances souhaité, réparti sur l'ensemble de la
-//   génération (priorité aux films les plus en retard sur leur quota).
+// Modèle : 4 blocs fixes par jour et par salle (matin, aprem, soir1, soir2),
+// UN SEUL FILM par (jour, salle, bloc) — pas d'enchaînement libre à l'intérieur d'un bloc.
+//
+// Ajustement d'horaire : si l'horaire de base d'un bloc est trop proche de la fin du
+// film du bloc précédent (même salle, même jour), on décale de 15 min ; si ça ne
+// suffit toujours pas, de 30 min. Le plus petit décalage suffisant est toujours choisi.
+//
+// Classification :
+// - Un film "tous publics" (classification null) ne peut jamais jouer sur le bloc
+//   "soir2" (dernière séance du soir).
+// - Les blocs du soir (soir1, soir2) sont prioritaires pour les films classifiés
+//   (12/16/18) ; les blocs de jour (matin, aprem) sont prioritaires pour les films
+//   tous publics. C'est une PRÉFÉRENCE, pas une exclusion : si aucun film approprié
+//   n'a de quota restant sur un bloc donné, un film moins "approprié" peut y être
+//   placé pour honorer une forte demande de séances.
 
-export type Jour =
-  | "LUNDI" | "MARDI" | "MERCREDI" | "JEUDI"
-  | "VENDREDI" | "SAMEDI" | "DIMANCHE";
+export type Jour = "MERCREDI" | "JEUDI" | "VENDREDI" | "SAMEDI" | "DIMANCHE" | "LUNDI" | "MARDI";
+const JOURS: Jour[] = ["MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE", "LUNDI", "MARDI"];
 
-const JOURS: Jour[] = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"];
+const NB_SALLES = 2;
+
+// Horaires de base : [Salle 1, Salle 2] pour chaque bloc, dans l'ordre chronologique.
+const BLOCS: { nom: string; horaires: [string, string] }[] = [
+  { nom: "matin", horaires: ["11:00", "11:00"] },
+  { nom: "aprem", horaires: ["15:30", "15:45"] },
+  { nom: "soir1", horaires: ["18:00", "18:15"] },
+  { nom: "soir2", horaires: ["20:45", "21:00"] },
+];
+
+const DECALAGES_MINUTES = [0, 15, 30]; // essayés dans cet ordre ; le premier qui convient est retenu
+const MARGE_SOUHAITEE_MIN = 15; // battement désiré entre la fin d'un film et le début du suivant — [Guessing], à ajuster si besoin
 
 export type FilmAvecQuota = {
   id: string;
   titre: string;
   dureeMinutes: number;
   nbSeancesSouhaite: number;
-  publicCible?: string; // ex: "ENFANT"
-};
-
-export type Bloc = {
-  id: string;
-  nom: string;
-  ordre: number;
-};
-
-// Horaire par défaut d'un bloc, propre à une salle.
-export type HoraireDefaut = {
-  blocId: string;
-  salleIndex: number;
-  heureDebut: string; // "HH:mm"
-};
-
-// Exception ponctuelle (jour + période éventuelle), applicable à une salle ou à toutes.
-export type ExceptionHoraire = {
-  jour: Jour;
-  blocId: string;
-  salleIndex?: number;     // absent = toutes les salles
-  heureDebut?: string;     // absent = pas de changement d'horaire
-  publicRequis?: string;   // restreint les films éligibles sur ce bloc/jour
-  periodeDebut?: string;   // "MM-DD"
-  periodeFin?: string;     // "MM-DD"
+  classification?: string; // absent/null = tous publics ; sinon "12", "16", "18"
 };
 
 export type SeanceGeneree = {
   filmId: string;
   salleIndex: number;
   jour: Jour;
-  blocId: string;
+  blocNom: string;
   heureDebut: string;
+  semaine: string;
 };
 
 export type FilmNonComplet = {
@@ -74,112 +64,86 @@ function heureEnMinutes(heure: string): number {
   const [h, m] = heure.split(":").map(Number);
   return h * 60 + m;
 }
-
 function minutesEnHeure(minutes: number): string {
   const h = Math.floor(minutes / 60) % 24;
   const m = minutes % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-/** "MM-DD" de la date courante tombe-t-il dans [debut, fin] ? Gère le cas où la période chevauche l'année (ex: 12-15 -> 01-15). */
-function dansLaPeriode(dateMD: string, debut?: string, fin?: string): boolean {
-  if (!debut || !fin) return true;
-  if (debut <= fin) return dateMD >= debut && dateMD <= fin;
-  return dateMD >= debut || dateMD <= fin; // période à cheval sur le nouvel an
+function estTousPublics(film: FilmAvecQuota): boolean {
+  return !film.classification;
 }
 
-/** Trouve l'exception applicable (jour + salle + période), s'il y en a une, la plus spécifique en priorité (salle explicite > toutes salles). */
-function trouverException(
-  exceptions: ExceptionHoraire[],
-  jour: Jour,
-  blocId: string,
-  salleIndex: number,
-  dateMD: string
-): ExceptionHoraire | null {
-  const candidates = exceptions.filter(
-    e =>
-      e.jour === jour &&
-      e.blocId === blocId &&
-      (e.salleIndex === undefined || e.salleIndex === salleIndex) &&
-      dansLaPeriode(dateMD, e.periodeDebut, e.periodeFin)
-  );
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => (a.salleIndex !== undefined ? -1 : 1)); // salle explicite d'abord
-  return candidates[0];
+/** Un film tous publics ne peut jamais jouer sur le bloc "soir2". */
+function filmEligible(film: FilmAvecQuota, nomBloc: string): boolean {
+  if (nomBloc === "soir2" && estTousPublics(film)) return false;
+  return true;
+}
+
+/** 0 = créneau idéal pour ce film, 1 = acceptable seulement si rien de mieux n'est disponible. */
+function scoreAppropriateness(film: FilmAvecQuota, nomBloc: string): number {
+  const estSoir = nomBloc === "soir1" || nomBloc === "soir2";
+  if (estSoir) return estTousPublics(film) ? 1 : 0;
+  return estTousPublics(film) ? 0 : 1;
 }
 
 export function genererPlanning(
   films: FilmAvecQuota[],
-  nbSalles: number,
-  blocs: Bloc[],
-  horairesDefaut: HoraireDefaut[],
-  exceptions: ExceptionHoraire[],
-  semaines: string[],
-  dateReferenceParSemaine: Record<string, string>, // semaine -> "MM-DD" représentative, pour évaluer les exceptions saisonnières
-  margeMinutes = 20
+  semaines: string[]
 ): ResultatGeneration {
   if (films.length === 0) throw new Error("Aucun film fourni.");
-  if (blocs.length === 0) throw new Error("Aucun bloc horaire fourni.");
 
-  const blocsTries = [...blocs].sort((a, b) => a.ordre - b.ordre);
   const seancesPlaceesParFilm = new Map<string, number>(films.map(f => [f.id, 0]));
   const seances: SeanceGeneree[] = [];
 
-  function choisirFilm(minutesDispo: number | null, publicRequis?: string): FilmAvecQuota | null {
+  function choisirFilm(nomBloc: string): FilmAvecQuota | null {
     const candidats = films
+      .filter(f => filmEligible(f, nomBloc))
       .filter(f => (seancesPlaceesParFilm.get(f.id) ?? 0) < f.nbSeancesSouhaite)
-      .filter(f => !publicRequis || f.publicCible === publicRequis)
-      .filter(f => minutesDispo === null || f.dureeMinutes + margeMinutes <= minutesDispo)
       .sort((a, b) => {
+        const scoreA = scoreAppropriateness(a, nomBloc);
+        const scoreB = scoreAppropriateness(b, nomBloc);
+        if (scoreA !== scoreB) return scoreA - scoreB; // le plus approprié d'abord
         const restantA = a.nbSeancesSouhaite - (seancesPlaceesParFilm.get(a.id) ?? 0);
         const restantB = b.nbSeancesSouhaite - (seancesPlaceesParFilm.get(b.id) ?? 0);
-        return restantB - restantA;
+        return restantB - restantA; // à égalité d'à-propos, le plus en retard sur son quota d'abord
       });
     return candidats[0] ?? null;
   }
 
-  function heureDefautBloc(blocId: string, salleIndex: number): string {
-    const h = horairesDefaut.find(h => h.blocId === blocId && h.salleIndex === salleIndex);
-    if (!h) throw new Error(`Aucun horaire par défaut pour le bloc ${blocId} / salle ${salleIndex}.`);
-    return h.heureDebut;
-  }
-
   for (const semaine of semaines) {
-    const dateMD = dateReferenceParSemaine[semaine] ?? "01-01";
-
     for (const jour of JOURS) {
-      for (let salleIndex = 0; salleIndex < nbSalles; salleIndex++) {
-        for (let bi = 0; bi < blocsTries.length; bi++) {
-          const bloc = blocsTries[bi];
-          const blocSuivant = blocsTries[bi + 1];
+      for (let salleIndex = 0; salleIndex < NB_SALLES; salleIndex++) {
+        let finFilmPrecedent: number | null = null; // minutes depuis minuit, dans cette salle/jour
 
-          const exception = trouverException(exceptions, jour, bloc.id, salleIndex, dateMD);
-          const heureDepart = exception?.heureDebut ?? heureDefautBloc(bloc.id, salleIndex);
-          const publicRequis = exception?.publicRequis;
+        for (const bloc of BLOCS) {
+          const horaireBase = heureEnMinutes(bloc.horaires[salleIndex]);
 
-          // Limite = début du bloc suivant DANS LA MÊME SALLE (ou pas de limite si dernier bloc).
-          const limiteMinutes = blocSuivant
-            ? heureEnMinutes(heureDefautBloc(blocSuivant.id, salleIndex))
-            : null;
-
-          let curseurMinutes = heureEnMinutes(heureDepart);
-
-          while (true) {
-            const dispo = limiteMinutes === null ? null : limiteMinutes - curseurMinutes;
-            const film = choisirFilm(dispo, publicRequis);
-            if (!film) break;
-
-            seances.push({
-              filmId: film.id,
-              salleIndex,
-              jour,
-              blocId: bloc.id,
-              heureDebut: minutesEnHeure(curseurMinutes),
-            });
-
-            seancesPlaceesParFilm.set(film.id, (seancesPlaceesParFilm.get(film.id) ?? 0) + 1);
-            curseurMinutes += film.dureeMinutes + margeMinutes;
+          // Choisit le plus petit décalage (0, 15 ou 30 min) qui respecte la marge
+          // souhaitée par rapport à la fin du film précédent dans cette salle.
+          let horaireChoisi: number | null = null;
+          for (const decalage of DECALAGES_MINUTES) {
+            const candidat = horaireBase + decalage;
+            if (finFilmPrecedent === null || candidat - finFilmPrecedent >= MARGE_SOUHAITEE_MIN) {
+              horaireChoisi = candidat;
+              break;
+            }
           }
+          if (horaireChoisi === null) continue; // même +30 min ne suffit pas : bloc laissé vide ce jour-là
+
+          const film = choisirFilm(bloc.nom);
+          if (!film) continue; // aucun film éligible avec du quota restant : bloc laissé vide
+
+          seances.push({
+            filmId: film.id,
+            salleIndex,
+            jour,
+            blocNom: bloc.nom,
+            heureDebut: minutesEnHeure(horaireChoisi),
+            semaine,
+          });
+          seancesPlaceesParFilm.set(film.id, (seancesPlaceesParFilm.get(film.id) ?? 0) + 1);
+          finFilmPrecedent = horaireChoisi + film.dureeMinutes;
         }
       }
     }
