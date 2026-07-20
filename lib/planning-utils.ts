@@ -1,16 +1,25 @@
-// Fonctions pures partagées entre le client (drag & drop), les routes API et le
-// générateur automatique (lib/scheduler.ts). Aucun import Prisma ici : ce fichier
-// doit rester utilisable côté navigateur.
+// Fonctions pures partagées entre le client (drag & drop) et les routes API.
+// Aucun import Prisma ici : ce fichier doit rester utilisable côté navigateur.
 
 export const MINUTES_JOUR = 24 * 60; // 1440
 
-// Marge minimale (en minutes) entre la fin d'une séance et le début de la
-// suivante, dans une même salle. Source unique de vérité : utilisée à la fois
-// par la programmation manuelle (frise, API /api/placements) et par le
-// générateur automatique (lib/scheduler.ts), pour garantir que les deux modes
-// appliquent exactement la même règle métier (cahier des charges V9, §"Marge
-// entre les films" + §"Vérifications à effectuer").
-export const MARGE_MIN_ENTRE_FILMS = 15;
+// Ordre cyclique des jours (semaine de cinéma : mercredi -> mardi). Sert à
+// retrouver "la veille" / "le lendemain" pour les séances qui débordent après
+// minuit — un film qui finit à 02:00 le jeudi doit être comparé aux séances du
+// vendredi tôt le matin, sinon deux films pourraient se chevaucher réellement
+// dans une même salle sans qu'aucun conflit ne soit détecté.
+export const JOURS = ["MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE", "LUNDI", "MARDI"] as const;
+export type Jour = (typeof JOURS)[number];
+
+export function jourPrecedent(jour: Jour): Jour {
+  const i = JOURS.indexOf(jour);
+  return JOURS[(i - 1 + JOURS.length) % JOURS.length];
+}
+
+export function jourSuivant(jour: Jour): Jour {
+  const i = JOURS.indexOf(jour);
+  return JOURS[(i + 1) % JOURS.length];
+}
 
 /** Convertit "HH:mm" en minutes depuis minuit. */
 export function heureVersMinutes(heure: string): number {
@@ -36,40 +45,42 @@ export function formatDuree(minutes: number): string {
 }
 
 /**
- * Deux créneaux [aDebut, aFin) et [bDebut, bFin) sont-ils en conflit, en tenant
- * compte d'une marge minimale obligatoire entre eux (pas seulement d'un
- * chevauchement strict) ? `marge` par défaut = MARGE_MIN_ENTRE_FILMS.
+ * Deux créneaux [aDebut, aFin) et [bDebut, bFin) se chevauchent-ils ?
+ * Un film qui commence exactement quand le précédent se termine (bDebut === aFin)
+ * n'est PAS un chevauchement : c'est un enchaînement valide.
  */
-export function seChevauchent(
-  aDebut: number,
-  aFin: number,
-  bDebut: number,
-  bFin: number,
-  marge: number = MARGE_MIN_ENTRE_FILMS
-): boolean {
-  return aDebut < bFin + marge && bDebut < aFin + marge;
+export function seChevauchent(aDebut: number, aFin: number, bDebut: number, bFin: number): boolean {
+  return aDebut < bFin && bDebut < aFin;
 }
 
 export type CreneauOccupe = { id: string; heureDebut: number; dureeMinutes: number };
 
 /**
- * Cherche un créneau de la liste qui entre en conflit avec le candidat (en tenant
- * compte de la marge minimale). `candidat.id` (s'il existe) est ignoré dans la
- * comparaison, pour permettre de vérifier le déplacement d'une séance déjà placée
- * sans qu'elle se bloque elle-même.
+ * Cherche un créneau de la liste qui chevauche le candidat. `candidat.id` (s'il
+ * existe) est ignoré dans la comparaison, pour permettre de vérifier le
+ * déplacement d'une séance déjà placée sans qu'elle se bloque elle-même.
  */
 export function trouverConflit(
   placements: CreneauOccupe[],
-  candidat: { id?: string; heureDebut: number; dureeMinutes: number },
-  marge: number = MARGE_MIN_ENTRE_FILMS
+  candidat: { id?: string; heureDebut: number; dureeMinutes: number }
 ): CreneauOccupe | null {
   const finCandidat = candidat.heureDebut + candidat.dureeMinutes;
   for (const p of placements) {
     if (candidat.id && p.id === candidat.id) continue;
     const finP = p.heureDebut + p.dureeMinutes;
-    if (seChevauchent(candidat.heureDebut, finCandidat, p.heureDebut, finP, marge)) return p;
+    if (seChevauchent(candidat.heureDebut, finCandidat, p.heureDebut, finP)) return p;
   }
   return null;
+}
+
+/**
+ * Décale un lot de créneaux d'un offset fixe (en minutes) — utilisé pour ramener
+ * les créneaux de la veille ou du lendemain dans le référentiel du jour candidat
+ * avant de tester les chevauchements avec trouverConflit (veille : -MINUTES_JOUR,
+ * lendemain : +MINUTES_JOUR).
+ */
+export function decalerCreneaux(placements: CreneauOccupe[], offsetMinutes: number): CreneauOccupe[] {
+  return placements.map(p => ({ ...p, heureDebut: p.heureDebut + offsetMinutes }));
 }
 
 /**
@@ -93,3 +104,4 @@ export function couleurFilm(filmId: string): string {
   const teinte = hash % 360;
   return `hsl(${teinte}, 62%, 50%)`;
 }
+

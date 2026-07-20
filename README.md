@@ -1,16 +1,20 @@
 # Programmation cinéma
 
-Application Next.js + Prisma/Postgres pour générer automatiquement le planning hebdomadaire d'un cinéma (2 salles, 4 blocs horaires fixes par jour) sous forme de tableau jour × film.
+Application Next.js + Prisma/Postgres pour programmer manuellement le planning
+d'un cinéma (2 salles), sous forme de frise horaire glisser-déposer.
 
 ## Structure du projet
-- `prisma/schema.prisma` — modèle de données : seulement `Film`, `Semaine`, `Seance`. Salles et horaires ne sont plus des tables — ce sont des constantes dans le code.
-- `lib/scheduler.ts` — algorithme de placement automatique. **C'est le seul endroit où salles/blocs/horaires sont définis** (constantes `BLOCS`, `NB_SALLES` en tête de fichier).
+- `prisma/schema.prisma` — modèle de données : `Film` et `Placement` uniquement.
+- `lib/planning-utils.ts` — fonctions pures partagées (conversion d'heures,
+  détection de chevauchement) entre le client (frise) et les routes API.
 - `lib/prisma.ts` — client Prisma singleton
 - `app/api/films/` — CRUD films
-- `app/api/generer/` — génère et sauvegarde le planning
-- `app/generer/` — unique page d'usage : films, quotas de séances, semaines, tableau résultat
+- `app/api/placements/` — CRUD des séances placées manuellement
+- `app/films/` — gestion des films (titre, durée, classification)
+- `app/programmation/` — unique page de planification : frise horaire, 2 salles, glisser-déposer
 
-Il n'y a plus de page "Réglages". Pour changer les horaires de base, les salles ou les blocs, il faut éditer les constantes en haut de `lib/scheduler.ts` directement.
+Il n'y a plus de génération automatique ni de page « Générer ». Toute la
+programmation se fait à la main dans l'onglet Programmation.
 
 ## Mise en place
 
@@ -20,35 +24,45 @@ npm install
 npm run dev
 ```
 
-### 2. Base de données (Neon via Vercel)
+### 2. Base de données (Neon via Vercel, ou toute base Postgres)
 ```powershell
-npx prisma migrate dev --name v6_suppression_reglages
+npx prisma migrate dev
 ```
-**Attention** : cette migration supprime les tables `Salle`, `Bloc`, `BlocHoraireDefaut`, `ExceptionHoraire` et change la structure de `Seance`. Si tu as des séances de test déjà générées avec l'ancien modèle, elles seront perdues — sans conséquence si c'est encore un environnement de dev.
+Si tu repars d'une base v9 existante, la migration `v10_suppression_generation`
+est **destructive** : elle supprime la table `Seance` (résultat de l'ancienne
+génération auto) et la colonne `Film.seancesParSemaine`. `Placement` (programmation
+manuelle) n'est pas touché.
 
 ### 3. GitHub → Vercel
-Inchangé par rapport aux étapes précédentes : push sur GitHub, importer le projet sur Vercel (Root Directory vide, Framework Preset = Next.js), `DATABASE_URL` injecté par l'intégration Neon.
+Push sur GitHub, importer le projet sur Vercel (Root Directory vide, Framework
+Preset = Next.js), `DATABASE_URL` injecté par l'intégration Neon (ou définie
+manuellement dans les variables d'environnement du projet Vercel).
 
-## Comment fonctionne la génération
+**Important pour le déploiement** : `npm run build` ne fait que `prisma generate`
+(génère le client TypeScript), il n'applique **pas** les migrations sur la base
+de production. Avant — ou juste après — le premier déploiement Vercel avec ce
+schéma, exécute une fois, avec `DATABASE_URL` pointant vers la base de prod :
+```powershell
+npx prisma migrate deploy
+```
+Sans cette étape, l'app déployée pointera vers une base dont le schéma ne
+correspond pas au code (colonne/table encore présentes ou manquantes) et les
+routes `/api/films` et `/api/placements` échoueront.
 
-**Horaires de base** (dans `lib/scheduler.ts`, constante `BLOCS`) :
-| Bloc | Salle 1 | Salle 2 |
-|---|---|---|
-| matin | 11h00 | 11h00 |
-| aprem | 15h30 | 15h45 |
-| soir1 | 18h00 | 18h15 |
-| soir2 | 20h45 | 21h00 |
+## Comment fonctionne la programmation
 
-Un seul film par (jour, salle, bloc) — pas d'enchaînement libre à l'intérieur d'un bloc.
+- 2 salles fixes.
+- N'importe quel film peut être placé à n'importe quelle heure, dans n'importe
+  quelle salle, n'importe quel jour — tous les jours sont traités de la même
+  façon (aucune exception, aucun horaire imposé).
+- Seule contrainte : deux films ne peuvent pas se chevaucher dans une même
+  salle. Un film peut commencer exactement à la minute où le précédent se
+  termine (pas de marge minimale imposée).
+- Les séances sont réparties sur 2 semaines indépendantes (1 et 2), chacune
+  avec ses propres placements.
 
-**Ajustement automatique** : si l'horaire de base d'un bloc est trop proche de la fin du film du bloc précédent (même salle, même jour), l'horaire est décalé de +15 min ; si ça ne suffit toujours pas, +30 min. Le plus petit décalage suffisant est toujours choisi. Marge de battement désirée : 15 min (constante `MARGE_SOUHAITEE_MIN`, **[Guessing]**, à ajuster si ce n'est pas la bonne valeur).
-
-**Classification et créneaux** :
-- Un film "tous publics" ne joue jamais sur le bloc `soir2` (dernière séance du soir).
-- Les blocs du soir (`soir1`, `soir2`) sont prioritaires pour les films classifiés (12/16/18) ; les blocs de jour (`matin`, `aprem`) sont prioritaires pour les films tous publics.
-- C'est une préférence, pas une règle stricte : si aucun film approprié n'a de quota restant sur un bloc, un film moins approprié peut y être placé pour honorer une forte demande de séances.
-
-## Points encore ouverts
-- Marge de battement (15 min) et paliers de décalage (0/15/30) non exposés dans l'UI — modifiables seulement dans le code.
-- Pas de gestion des événements spéciaux ("Ciné P'tit Dej"), ni de l'exception saisonnière (jeudi été / films enfants) présente dans une version précédente — supprimée avec Réglages. À recoder en dur dans `scheduler.ts` si toujours nécessaire.
-- Cascade de suppression toujours active sur `Seance` : retirer un film retire ses séances déjà générées.
+## Points ouverts
+- Cascade de suppression toujours active sur `Placement` : retirer un film
+  retire ses séances déjà placées.
+- Pas de limite sur le nombre de fois qu'un film peut être placé (plus de
+  quota) : c'est voulu, la contrainte est désormais purement horaire.

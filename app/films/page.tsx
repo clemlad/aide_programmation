@@ -8,7 +8,6 @@ type Film = {
   titre: string;
   dureeMinutes: number;
   classification: string | null;
-  seancesParSemaine: number;
 };
 
 const OPTIONS_CLASSIFICATION = [
@@ -29,7 +28,6 @@ export default function Films() {
   const [heures, setHeures] = useState("");
   const [minutes, setMinutes] = useState("");
   const [classification, setClassification] = useState("");
-  const [seancesParSemaine, setSeancesParSemaine] = useState("");
 
   function chargerFilms() {
     fetch("/api/films")
@@ -49,7 +47,6 @@ export default function Films() {
     setHeures("");
     setMinutes("");
     setClassification("");
-    setSeancesParSemaine("");
     setErreur("");
     setFormOuvert(true);
   }
@@ -60,7 +57,6 @@ export default function Films() {
     setHeures(String(Math.floor(f.dureeMinutes / 60)));
     setMinutes(String(f.dureeMinutes % 60));
     setClassification(f.classification ?? "");
-    setSeancesParSemaine(String(f.seancesParSemaine ?? 0));
     setErreur("");
     setFormOuvert(true);
   }
@@ -76,11 +72,6 @@ export default function Films() {
       setErreur("La durée doit être supérieure à 0.");
       return;
     }
-    const quota = Number(seancesParSemaine);
-    if (!Number.isInteger(quota) || quota < 1) {
-      setErreur("Le nombre de séances par semaine est obligatoire (entier ≥ 1).");
-      return;
-    }
 
     if (filmEnEdition) {
       await fetch("/api/films", {
@@ -90,13 +81,12 @@ export default function Films() {
           titre,
           dureeMinutes,
           classification: classification || null,
-          seancesParSemaine: quota,
         }),
       });
     } else {
       const res = await fetch("/api/films", {
         method: "POST",
-        body: JSON.stringify({ titre, dureeMinutes, classification: classification || null, seancesParSemaine: quota }),
+        body: JSON.stringify({ titre, dureeMinutes, classification: classification || null }),
       });
       if (!res.ok) {
         const d = await lireJsonSecurise(res);
@@ -124,7 +114,7 @@ export default function Films() {
       <h1>Films</h1>
       <p style={{ color: "var(--text-dim)" }}>
         Chaque film devient une carte de couleur, réutilisable dans l'onglet <a href="/programmation">Programmation</a>{" "}
-        par glisser-déposer, et sert de base au quota utilisé par <a href="/generer">Générer</a>.
+        par glisser-déposer.
       </p>
 
       {erreur && <div className="alerte">{erreur}</div>}
@@ -141,7 +131,6 @@ export default function Films() {
             <div className="carte-film-corps">
               <h3>{f.titre}</h3>
               <p className="carte-film-duree">{formatDuree(f.dureeMinutes)}</p>
-              <p className="carte-film-duree">{f.seancesParSemaine} séance(s) / semaine</p>
               {f.classification && <span className="badge-classification">{f.classification}</span>}
             </div>
             <div className="carte-film-actions">
@@ -195,17 +184,6 @@ export default function Films() {
                   ))}
                 </select>
               </div>
-            </div>
-            <div className="champ">
-              <label>Séances requises / semaine *</label>
-              <input
-                type="number"
-                min={1}
-                required
-                value={seancesParSemaine}
-                onChange={e => setSeancesParSemaine(e.target.value)}
-                style={{ width: "6rem" }}
-              />
             </div>
             <div className="ligne" style={{ marginTop: "1rem", justifyContent: "flex-end" }}>
               <button type="button" className="secondaire" onClick={() => setFormOuvert(false)}>

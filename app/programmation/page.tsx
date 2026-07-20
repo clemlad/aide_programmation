@@ -1,9 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState, type DragEvent } from "react";
-import { couleurFilm, formatDuree, minutesVersHeure, heureVersMinutes, trouverConflit, MINUTES_JOUR, lireJsonSecurise } from "@/lib/planning-utils";
+import {
+  couleurFilm,
+  formatDuree,
+  minutesVersHeure,
+  heureVersMinutes,
+  trouverConflit,
+  decalerCreneaux,
+  jourPrecedent,
+  jourSuivant,
+  MINUTES_JOUR,
+  lireJsonSecurise,
+  type Jour,
+  type CreneauOccupe,
+} from "@/lib/planning-utils";
 
-type Film = { id: string; titre: string; dureeMinutes: number; classification: string | null; seancesParSemaine: number };
+type Film = { id: string; titre: string; dureeMinutes: number; classification: string | null };
 type Placement = {
   id: string;
   semaine: number;
@@ -13,7 +26,7 @@ type Placement = {
   film: Film;
 };
 
-const JOURS: { valeur: string; label: string }[] = [
+const JOURS_AFFICHES: { valeur: Jour; label: string }[] = [
   { valeur: "MERCREDI", label: "Mercredi" },
   { valeur: "JEUDI", label: "Jeudi" },
   { valeur: "VENDREDI", label: "Vendredi" },
@@ -41,13 +54,14 @@ function minutesDepuisPosition(rect: DOMRect, clientX: number): number {
 export default function Programmation() {
   const [films, setFilms] = useState<Film[]>([]);
   const [semaine, setSemaine] = useState<1 | 2>(1);
-  const [jour, setJour] = useState(JOURS[0].valeur);
+  const [jour, setJour] = useState<Jour>(JOURS_AFFICHES[0].valeur);
 
-  // Placements de TOUTE la semaine sélectionnée (7 jours) : sert à la fois à la
-  // frise du jour courant (filtré côté client) et aux compteurs de séances
-  // restantes, qui portent sur la semaine entière — voir cahier des charges §5 :
-  // "les compteurs doivent conserver leurs valeurs" en changeant de jour.
-  const [placementsSemaine, setPlacementsSemaine] = useState<Placement[]>([]);
+  const [placementsJour, setPlacementsJour] = useState<Placement[]>([]);
+  // Séances de la veille qui débordent après minuit : affichées en début de
+  // frise aujourd'hui (lecture seule) et utilisées pour la détection de
+  // chevauchement côté client (l'API refait de toute façon la vérification).
+  const [placementsVeille, setPlacementsVeille] = useState<Placement[]>([]);
+  const [placementsLendemain, setPlacementsLendemain] = useState<Placement[]>([]);
   const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState("");
 
@@ -62,44 +76,57 @@ export default function Programmation() {
     fetch("/api/films").then(r => r.json()).then(setFilms);
   }, []);
 
-  async function chargerPlacementsSemaine(s: number) {
+  async function chargerJournee(s: number, j: Jour) {
     setChargement(true);
-    const res = await fetch(`/api/placements?semaine=${s}`);
-    const p = await lireJsonSecurise<Placement[]>(res);
-    if (!res.ok || !p) {
-      setErreur((p as any)?.erreur ?? `Impossible de charger le planning de cette semaine (${res.status}).`);
-      setPlacementsSemaine([]);
+    const [resJour, resVeille, resLendemain] = await Promise.all([
+      fetch(`/api/placements?semaine=${s}&jour=${j}`),
+      fetch(`/api/placements?semaine=${s}&jour=${jourPrecedent(j)}`),
+      fetch(`/api/placements?semaine=${s}&jour=${jourSuivant(j)}`),
+    ]);
+    const [pJour, pVeille, pLendemain] = await Promise.all([
+      lireJsonSecurise<Placement[]>(resJour),
+      lireJsonSecurise<Placement[]>(resVeille),
+      lireJsonSecurise<Placement[]>(resLendemain),
+    ]);
+    if (!resJour.ok || !pJour) {
+      setErreur((pJour as any)?.erreur ?? `Impossible de charger le planning de ce jour (${resJour.status}).`);
+      setPlacementsJour([]);
     } else {
-      setPlacementsSemaine(p);
+      setPlacementsJour(pJour);
     }
+    setPlacementsVeille(resVeille.ok && pVeille ? pVeille : []);
+    setPlacementsLendemain(resLendemain.ok && pLendemain ? pLendemain : []);
     setChargement(false);
   }
   useEffect(() => {
-    chargerPlacementsSemaine(semaine);
-  }, [semaine]);
-
-  const placementsJour = placementsSemaine.filter(p => p.jour === jour);
+    chargerJournee(semaine, jour);
+  }, [semaine, jour]);
 
   function placementsSalle(salleIndex: number) {
     return placementsJour.filter(p => p.salleIndex === salleIndex);
   }
 
-  function seancesRestantes(film: Film): number {
-    const nbPlacees = placementsSemaine.filter(p => p.film.id === film.id).length;
-    return Math.max(0, film.seancesParSemaine - nbPlacees);
+  /** Débordements de la veille visibles en tout début de frise aujourd'hui. */
+  function debordsVeilleSalle(salleIndex: number) {
+    return placementsVeille.filter(p => p.salleIndex === salleIndex && p.heureDebut + p.film.dureeMinutes > MINUTES_JOUR);
   }
 
+  function versCreneaux(liste: Placement[], salleIndex: number): CreneauOccupe[] {
+    return liste.filter(p => p.salleIndex === salleIndex).map(p => ({ id: p.id, heureDebut: p.heureDebut, dureeMinutes: p.film.dureeMinutes }));
+  }
+
+  /** Même logique que l'API (voir app/api/placements/route.ts) : compare aussi
+   * contre la veille et le lendemain décalés, pour prévisualiser correctement
+   * un chevauchement qui déborderait après minuit. */
   function calculerConflit(salleIndex: number, heureDebut: number, dureeMinutes: number, ignorerId?: string) {
-    const occupes = placementsSalle(salleIndex).map(p => ({ id: p.id, heureDebut: p.heureDebut, dureeMinutes: p.film.dureeMinutes }));
-    return trouverConflit(occupes, { id: ignorerId, heureDebut, dureeMinutes });
+    const occupesJour = versCreneaux(placementsJour, salleIndex);
+    const occupesVeille = decalerCreneaux(versCreneaux(placementsVeille, salleIndex), -MINUTES_JOUR);
+    const occupesLendemain = decalerCreneaux(versCreneaux(placementsLendemain, salleIndex), MINUTES_JOUR);
+    return trouverConflit([...occupesJour, ...occupesVeille, ...occupesLendemain], { id: ignorerId, heureDebut, dureeMinutes });
   }
 
   // --- Démarrage d'un glisser depuis la palette de films ---
   function debuterDragNouveau(e: DragEvent, film: Film) {
-    if (seancesRestantes(film) <= 0) {
-      e.preventDefault();
-      return;
-    }
     e.dataTransfer.setData("text/plain", film.id);
     e.dataTransfer.effectAllowed = "copy";
     setDragInfo({ type: "nouveau", filmId: film.id, titre: film.titre, dureeMinutes: film.dureeMinutes });
@@ -119,9 +146,8 @@ export default function Programmation() {
     if (!rect) return;
     const heureDebut = minutesDepuisPosition(rect, e.clientX);
     const ignorerId = dragInfo.type === "deplacement" ? dragInfo.placementId : undefined;
-    const depasseMinuit = heureDebut + dragInfo.dureeMinutes > MINUTES_JOUR;
-    const conflit = !depasseMinuit && !!calculerConflit(salleIndex, heureDebut, dragInfo.dureeMinutes, ignorerId);
-    setFantome({ salleIndex, heureDebut, dureeMinutes: dragInfo.dureeMinutes, titre: dragInfo.titre, conflit: conflit || depasseMinuit });
+    const conflit = !!calculerConflit(salleIndex, heureDebut, dragInfo.dureeMinutes, ignorerId);
+    setFantome({ salleIndex, heureDebut, dureeMinutes: dragInfo.dureeMinutes, titre: dragInfo.titre, conflit });
   }
 
   async function deposerSurBande(e: DragEvent, salleIndex: number) {
@@ -130,17 +156,11 @@ export default function Programmation() {
     const rect = bandeRefs.current[salleIndex]?.getBoundingClientRect();
     const heureDebut = rect ? minutesDepuisPosition(rect, e.clientX) : 0;
 
-    if (heureDebut + dragInfo.dureeMinutes > MINUTES_JOUR) {
-      setErreur(`"${dragInfo.titre}" dépasserait minuit à cette heure de début — choisis une heure plus tôt.`);
-      setDragInfo(null);
-      setFantome(null);
-      return;
-    }
-
     const ignorerId = dragInfo.type === "deplacement" ? dragInfo.placementId : undefined;
     const conflit = calculerConflit(salleIndex, heureDebut, dragInfo.dureeMinutes, ignorerId);
     if (conflit) {
-      const filmConflit = placementsJour.find(p => p.id === conflit.id)?.film.titre ?? "une autre séance";
+      const tousLesTitres = [...placementsJour, ...placementsVeille, ...placementsLendemain];
+      const filmConflit = tousLesTitres.find(p => p.id === conflit.id)?.film.titre ?? "une autre séance";
       setErreur(`Impossible de placer "${dragInfo.titre}" ici : chevauchement avec "${filmConflit}" dans ${NOMS_SALLES[salleIndex]}.`);
       setDragInfo(null);
       setFantome(null);
@@ -155,13 +175,13 @@ export default function Programmation() {
       });
       const d = await lireJsonSecurise(res);
       if (res.ok && d) {
-        setPlacementsSemaine(prev => [...prev, d as Placement]); // décrémente le compteur (recalculé au rendu)
+        setPlacementsJour(prev => [...prev, d as Placement]);
       } else {
         setErreur((d as any)?.erreur ?? `Impossible de placer ce film (${res.status}).`);
       }
     } else {
       // mise à jour optimiste
-      setPlacementsSemaine(prev => prev.map(p => (p.id === dragInfo.placementId ? { ...p, salleIndex, heureDebut } : p)));
+      setPlacementsJour(prev => prev.map(p => (p.id === dragInfo.placementId ? { ...p, salleIndex, heureDebut } : p)));
       const res = await fetch(`/api/placements/${dragInfo.placementId}`, {
         method: "PATCH",
         body: JSON.stringify({ salleIndex, heureDebut }),
@@ -169,7 +189,7 @@ export default function Programmation() {
       if (!res.ok) {
         const d = await lireJsonSecurise(res);
         setErreur((d as any)?.erreur ?? `Impossible de déplacer ce film (${res.status}).`);
-        chargerPlacementsSemaine(semaine); // annule la mise à jour optimiste en cas d'échec
+        chargerJournee(semaine, jour); // annule la mise à jour optimiste en cas d'échec
       }
     }
     setDragInfo(null);
@@ -183,7 +203,8 @@ export default function Programmation() {
 
   async function supprimerPlacement(id: string) {
     setErreur("");
-    setPlacementsSemaine(prev => prev.filter(p => p.id !== id)); // le compteur remonte automatiquement
+    setPlacementsJour(prev => prev.filter(p => p.id !== id));
+    setPlacementsVeille(prev => prev.filter(p => p.id !== id));
     await fetch(`/api/placements/${id}`, { method: "DELETE" });
     if (editionId === id) setEditionId(null);
   }
@@ -203,21 +224,20 @@ export default function Programmation() {
     });
     const d = await lireJsonSecurise(res);
     if (res.ok && d) {
-      setPlacementsSemaine(prev => prev.map(x => (x.id === p.id ? (d as Placement) : x)));
+      setPlacementsJour(prev => prev.map(x => (x.id === p.id ? (d as Placement) : x)));
       setEditionId(null);
     } else {
       setErreur((d as any)?.erreur ?? "Heure invalide.");
     }
   }
 
-  const filmsProgrammables = films.filter(f => f.seancesParSemaine > 0);
-
   return (
     <main>
       <h1>Programmation</h1>
       <p style={{ color: "var(--text-dim)" }}>
         Glisse un film depuis la palette vers l'une des deux salles. Glisse un film déjà placé pour le déplacer.
-        Clique sur son horaire pour le régler précisément.
+        Clique sur son horaire pour le régler précisément. Un film peut commencer dès que le précédent se termine,
+        et peut se terminer après minuit — la portion après minuit apparaît alors en début de frise le jour suivant.
       </p>
 
       <div className="selecteur-jours" style={{ marginBottom: "0.5rem" }}>
@@ -234,7 +254,7 @@ export default function Programmation() {
       </div>
 
       <div className="selecteur-jours">
-        {JOURS.map(j => (
+        {JOURS_AFFICHES.map(j => (
           <button
             key={j.valeur}
             type="button"
@@ -249,31 +269,26 @@ export default function Programmation() {
       {erreur && <div className="alerte">{erreur}</div>}
 
       <section className="panneau">
-        <h2>Films disponibles — Semaine {semaine}</h2>
-        {filmsProgrammables.length === 0 ? (
+        <h2>Films disponibles</h2>
+        {films.length === 0 ? (
           <p style={{ color: "var(--text-dim)" }}>
-            Aucun film avec un quota de séances par semaine — règle-le dans l'onglet <a href="/films">Films</a>.
+            Aucun film pour l'instant — ajoutes-en dans l'onglet <a href="/films">Films</a>.
           </p>
         ) : (
           <div className="palette-films">
-            {filmsProgrammables.map(f => {
-              const restantes = seancesRestantes(f);
-              return (
-                <div
-                  key={f.id}
-                  className="carte-palette"
-                  style={{ background: couleurFilm(f.id), opacity: restantes <= 0 ? 0.4 : 1 }}
-                  draggable={restantes > 0}
-                  onDragStart={e => debuterDragNouveau(e, f)}
-                  onDragEnd={finDrag}
-                  title={restantes <= 0 ? "Quota de la semaine atteint" : undefined}
-                >
-                  <span className="carte-palette-titre">{f.titre}</span>
-                  <span className="carte-palette-duree">{formatDuree(f.dureeMinutes)}</span>
-                  <span className="carte-palette-duree">{restantes} / {f.seancesParSemaine} restantes</span>
-                </div>
-              );
-            })}
+            {films.map(f => (
+              <div
+                key={f.id}
+                className="carte-palette"
+                style={{ background: couleurFilm(f.id) }}
+                draggable
+                onDragStart={e => debuterDragNouveau(e, f)}
+                onDragEnd={finDrag}
+              >
+                <span className="carte-palette-titre">{f.titre}</span>
+                <span className="carte-palette-duree">{formatDuree(f.dureeMinutes)}</span>
+              </div>
+            ))}
           </div>
         )}
       </section>
@@ -304,15 +319,46 @@ export default function Programmation() {
                 <div key={h} className="trait-heure" style={{ left: `${(h / 24) * 100}%` }} />
               ))}
 
+              {debordsVeilleSalle(salleIndex).map(p => {
+                const largeurPct = Math.min(100, ((p.heureDebut + p.film.dureeMinutes - MINUTES_JOUR) / MINUTES_JOUR) * 100);
+                return (
+                  <div
+                    key={`debord-${p.id}`}
+                    className="bloc-seance bloc-seance--debord"
+                    style={{ left: "0%", width: `${largeurPct}%`, background: couleurFilm(p.film.id) }}
+                    title="Suite de la séance de la veille — modifie-la depuis le jour précédent."
+                  >
+                    <button
+                      type="button"
+                      className="bloc-seance-supprimer"
+                      onClick={() => supprimerPlacement(p.id)}
+                      title="Supprimer cette séance"
+                    >
+                      ×
+                    </button>
+                    <span className="bloc-seance-titre">{p.film.titre} (suite)</span>
+                    <span className="bloc-seance-horaire">
+                      00:00 – {minutesVersHeure(p.heureDebut + p.film.dureeMinutes)}
+                    </span>
+                  </div>
+                );
+              })}
+
               {placementsSalle(salleIndex).map(p => {
                 const fin = p.heureDebut + p.film.dureeMinutes;
+                const finApresMinuit = fin > MINUTES_JOUR;
+                const gauchePct = (p.heureDebut / MINUTES_JOUR) * 100;
+                // Largeur visuelle bornée au bord droit de la frise (le film continue
+                // réellement le lendemain — voir le bloc "(suite)" affiché sur le jour
+                // suivant — mais cette frise ne représente qu'une seule journée).
+                const largeurPct = Math.min((p.film.dureeMinutes / MINUTES_JOUR) * 100, 100 - gauchePct);
                 return (
                   <div
                     key={p.id}
                     className={`bloc-seance${dragInfo?.type === "deplacement" && dragInfo.placementId === p.id ? " bloc-seance--fantomise" : ""}`}
                     style={{
-                      left: `${(p.heureDebut / MINUTES_JOUR) * 100}%`,
-                      width: `${(p.film.dureeMinutes / MINUTES_JOUR) * 100}%`,
+                      left: `${gauchePct}%`,
+                      width: `${largeurPct}%`,
                       background: couleurFilm(p.film.id),
                     }}
                     draggable
@@ -325,6 +371,7 @@ export default function Programmation() {
                     <span className="bloc-seance-titre">{p.film.titre}</span>
                     <button type="button" className="bloc-seance-horaire" onClick={() => ouvrirEdition(p)}>
                       {minutesVersHeure(p.heureDebut)} – {minutesVersHeure(fin)}
+                      {finApresMinuit ? " (+1j)" : ""}
                     </button>
 
                     {editionId === p.id && (
@@ -349,7 +396,7 @@ export default function Programmation() {
                   className={`bloc-fantome${fantome.conflit ? " bloc-fantome--conflit" : ""}`}
                   style={{
                     left: `${(fantome.heureDebut / MINUTES_JOUR) * 100}%`,
-                    width: `${(fantome.dureeMinutes / MINUTES_JOUR) * 100}%`,
+                    width: `${Math.min((fantome.dureeMinutes / MINUTES_JOUR) * 100, 100 - (fantome.heureDebut / MINUTES_JOUR) * 100)}%`,
                   }}
                 >
                   {minutesVersHeure(fantome.heureDebut)}

@@ -1,15 +1,14 @@
-// Schéma Prisma — programmation cinéma (v8)
+// Schéma Prisma — programmation cinéma (v10)
 //
-// v7 : ajout de Placement (mode manuel, glisser-déposer).
-// v8 :
-//  - Film.seancesParSemaine : quota hebdomadaire souhaité par film (même valeur
-//    chaque semaine — voir lib/scheduler.ts pour la logique de remise à zéro).
-//  - Suppression du modèle Semaine (semaines calendaires ISO) : il n'y a plus que
-//    deux semaines indépendantes et fixes, identifiées par un entier 1 ou 2, sur
-//    Seance (génération auto) ET sur Placement (mode manuel).
-//  - Les événements spéciaux (Ciné P'tit Déj, etc.) ne sont PAS modélisés en base :
-//    ils vivent en code dans lib/scheduler.ts (EVENEMENTS_SPECIAUX), pour rester
-//    cohérent avec le choix déjà fait de sortir salles/blocs/horaires de la DB.
+// v10 : suppression complète de la génération automatique.
+//  - Film.seancesParSemaine supprimé : plus de quota, la programmation est
+//    entièrement manuelle.
+//  - Modèle Seance supprimé : il ne servait qu'à stocker le résultat de la
+//    génération automatique (onglet "Générer", supprimé).
+//  - Aucune notion d'événement spécial, de marge minimale ou de jour
+//    particulier n'est modélisée : tous les jours sont traités de façon
+//    identique et seule la non-superposition dans une même salle est vérifiée
+//    (voir lib/planning-utils.ts).
 
 generator client {
   provider = "prisma-client-js"
@@ -21,14 +20,12 @@ datasource db {
 }
 
 model Film {
-  id                String   @id @default(cuid())
-  titre             String
-  dureeMinutes      Int
-  classification    String?  // null = tous publics ; sinon "12", "16", "18" (âge minimum)
-  seancesParSemaine Int // quota hebdomadaire OBLIGATOIRE, identique semaine 1 et semaine 2 (validé dans app/api/films/route.ts)
-  createdAt         DateTime @default(now())
+  id             String   @id @default(cuid())
+  titre          String
+  dureeMinutes   Int
+  classification String? // null = tous publics ; sinon "12", "16", "18" (âge minimum)
+  createdAt      DateTime @default(now())
 
-  seances    Seance[]
   placements Placement[]
 }
 
@@ -42,27 +39,9 @@ enum Jour {
   MARDI
 }
 
-// Séance générée automatiquement (onglet Générer).
-model Seance {
-  id         String  @id @default(cuid())
-  semaine    Int // 1 ou 2 — les deux semaines sont totalement indépendantes
-  jour       Jour
-  salleIndex Int // 0 = Salle 1, 1 = Salle 2
-  blocNom    String // "matin" | "aprem" | "soir1" | "soir2"
-  heureDebut String // horaire réel calculé, après ajustement éventuel (±15/±30 min)
-  genereAuto Boolean @default(true)
-
-  film   Film   @relation(fields: [filmId], references: [id], onDelete: Cascade)
-  filmId String
-
-  @@unique([semaine, salleIndex, blocNom, jour])
-}
-
 // Séance placée à la main dans l'onglet "Programmation" (glisser-déposer).
 // Récurrente par jour de la semaine, rattachée à l'une des deux semaines
-// indépendantes (1 ou 2) : les quotas de chaque semaine sont donc distincts,
-// et un compteur de séances restantes se calcule en comptant les Placement
-// d'un film pour une semaine donnée, tous jours confondus.
+// indépendantes (1 ou 2).
 model Placement {
   id         String   @id @default(cuid())
   semaine    Int      @default(1) // 1 ou 2

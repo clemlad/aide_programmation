@@ -104,18 +104,6 @@ td {
   vertical-align: top;
 }
 
-.seance {
-  border-left: 3px solid var(--accent);
-  padding: 0.3rem 0 0.3rem 0.6rem;
-  margin-bottom: 0.3rem;
-  font-size: 0.88rem;
-}
-.seance .heure {
-  font-family: var(--font-mono);
-  color: var(--accent);
-  margin-right: 0.5rem;
-}
-
 .alerte {
   border-left: 3px solid var(--danger);
   background: var(--bg-panel);
@@ -128,30 +116,6 @@ td {
 .champ label { font-size: 0.8rem; color: var(--text-dim); }
 .ligne { display: flex; gap: 0.8rem; align-items: flex-end; flex-wrap: wrap; }
 
-/* Tableau jour x film, façon affiche imprimée */
-.grille-affiche { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
-.grille-affiche th, .grille-affiche td {
-  border: 1px solid var(--border);
-  padding: 0.5rem 0.6rem;
-  text-align: center;
-}
-.grille-affiche th.titre-film {
-  font-family: var(--font-display);
-  font-weight: 700;
-  vertical-align: bottom;
-  background: var(--bg-panel-raised);
-}
-.grille-affiche th.titre-film small { display: block; color: var(--text-dim); font-weight: 400; font-size: 0.7rem; }
-.grille-affiche td.jour-label {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  text-align: left;
-  background: var(--bg-panel-raised);
-}
-.grille-affiche td.horaire-matin { background: #2f4a34; color: #b7e0c0; font-family: var(--font-mono); }
-.grille-affiche td.horaire-normal { font-family: var(--font-mono); }
 .badge-classification {
   display: inline-block;
   border: 1px solid var(--text-dim);
@@ -334,6 +298,23 @@ td {
 }
 .bloc-seance:active { cursor: grabbing; }
 .bloc-seance--fantomise { opacity: 0.35; }
+
+.bloc-seance--debord {
+  cursor: default;
+  opacity: 0.75;
+  border-left: 3px dashed rgba(255, 255, 255, 0.7);
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(0, 0, 0, 0.15),
+    rgba(0, 0, 0, 0.15) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+}
+.bloc-seance--debord .bloc-seance-horaire {
+  cursor: default;
+  pointer-events: none;
+}
 
 .bloc-seance-titre {
   font-size: 0.8rem;
